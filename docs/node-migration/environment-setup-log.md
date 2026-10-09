@@ -13,21 +13,21 @@
 
 ## 已完成安装与验证
 
-| 项目 | 版本 | 用途 | 安装位置 | 验证方式 |
-|---|---|---|---|---|
-| Node.js | 22.23.2 | Node API 运行时 | 本机；部署环境待发布阶段确认 | `node --version` |
-| pnpm | 12.4.2 | 依赖安装与 lockfile | `resume-node/` 项目级 | `pnpm install --frozen-lockfile` |
-| TypeScript | 5.9.3 | 编译和类型检查 | `resume-node/` | `pnpm typecheck` |
-| Kysely + mysql2 | 0.29.6 / 3.24.4 | MySQL 只读调研及后续数据层 | `resume-node/` | 只读连接脚本成功 |
-| ioredis | 6.0.0 | 会话/缓存兼容 | `resume-node/` | 线上配置已完成 PING、TTL、读取和删除回归 |
-| Fastify | 5.12.5 | HTTP API | `resume-node/` | `/health` 集成测试 |
-| CORS 白名单 | `CORS_ORIGINS` | 仅允许已配置前端来源携带凭据 | 环境变量 | 预发布浏览器回归 |
-| Vercel AI SDK | ai 7.0.107 | AI 聊天与模型适配 | `resume-node/` | 阶段 5 用例验证 |
-| COS SDK | cos-nodejs-sdk-v5 3.0.0 | 腾讯云 COS 上传、删除和签名 URL | `resume-node/` | 线上配置已完成上传、HEAD、签名 URL、删除和删除后不存在回归 |
-| 文档解析 | mammoth 1.11.0 / pdf-parse 2.4.5 | DOCX/PDF 简历文本提取 | `resume-node/` | 类型检查、构建通过；需用真实样本文档回归 |
-| 火山方舟图片尺寸 | `DOUBAO_IMAGE_SIZE=2048x2048` | Seedream 图片生成的 provider 输出尺寸；与一寸/二寸业务记录尺寸分离 | `resume-node/` | 真实模型调用成功；尺寸不变量有自动化测试 |
-| Node 管理员密码解密 | sm-crypto 0.5.7 | 兼容 Snowy 管理端 SM2 密码传输并生成 SM3 密码摘要 | `resume-node/` | 密钥只从 `ADMIN_SM2_PRIVATE_KEY` 注入；单元测试验证缺失密钥时拒绝启动；真实账号登录留在预发布回归 |
-| Snowy 管理端依赖 | Vue 3 / Vite 4.2.1 及 `package.json` 声明依赖 | 验证现有后台页面可继续构建 | `ai-resume-service/snowy-admin-web/` | `npm install` 后 `npm run build` 通过；当前 `npm audit --omit=dev` 为 5 个残余漏洞（4 high、1 moderate、0 critical），未执行可能破坏旧页面的跨大版本升级 |
+| 项目                | 版本                                          | 用途                                                               | 安装位置                             | 验证方式                                                                                                                                                 |
+| ------------------- | --------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Node.js             | 22.23.2                                       | Node API 运行时                                                    | 本机；部署环境待发布阶段确认         | `node --version`                                                                                                                                         |
+| pnpm                | 12.4.2                                        | 依赖安装与 lockfile                                                | `resume-node/` 项目级                | `pnpm install --frozen-lockfile`                                                                                                                         |
+| TypeScript          | 5.9.3                                         | 编译和类型检查                                                     | `resume-node/`                       | `pnpm typecheck`                                                                                                                                         |
+| Kysely + mysql2     | 0.29.6 / 3.24.4                               | MySQL 只读调研及后续数据层                                         | `resume-node/`                       | 只读连接脚本成功                                                                                                                                         |
+| ioredis             | 6.0.0                                         | 会话/缓存兼容                                                      | `resume-node/`                       | 线上配置已完成 PING、TTL、读取和删除回归                                                                                                                 |
+| Fastify             | 5.12.5                                        | HTTP API                                                           | `resume-node/`                       | `/health` 集成测试                                                                                                                                       |
+| CORS 白名单         | `CORS_ORIGINS`                                | 仅允许已配置前端来源携带凭据                                       | 环境变量                             | 预发布浏览器回归                                                                                                                                         |
+| Vercel AI SDK       | ai 7.0.107                                    | AI 聊天与模型适配                                                  | `resume-node/`                       | 阶段 5 用例验证                                                                                                                                          |
+| COS SDK             | cos-nodejs-sdk-v5 3.0.0                       | 腾讯云 COS 上传、删除和签名 URL                                    | `resume-node/`                       | 线上配置已完成上传、HEAD、签名 URL、删除和删除后不存在回归                                                                                               |
+| 文档解析            | mammoth 1.11.0 / pdf-parse 2.4.5              | DOCX/PDF 简历文本提取                                              | `resume-node/`                       | 类型检查、构建通过；需用真实样本文档回归                                                                                                                 |
+| 火山方舟图片尺寸    | `DOUBAO_IMAGE_SIZE=2048x2048`                 | Seedream 图片生成的 provider 输出尺寸；与一寸/二寸业务记录尺寸分离 | `resume-node/`                       | 真实模型调用成功；尺寸不变量有自动化测试                                                                                                                 |
+| Node 管理员密码解密 | sm-crypto 0.5.7                               | 兼容 Snowy 管理端 SM2 密码传输并生成 SM3 密码摘要                  | `resume-node/`                       | 密钥只从 `ADMIN_SM2_PRIVATE_KEY` 注入；单元测试验证缺失密钥时拒绝启动；真实账号登录留在预发布回归                                                        |
+| Snowy 管理端依赖    | Vue 3 / Vite 4.2.1 及 `package.json` 声明依赖 | 验证现有后台页面可继续构建                                         | `ai-resume-service/snowy-admin-web/` | `npm install` 后 `npm run build` 通过；当前 `npm audit --omit=dev` 为 5 个残余漏洞（4 high、1 moderate、0 critical），未执行可能破坏旧页面的跨大版本升级 |
 
 前端构建脚本依赖安装补充：
 
@@ -68,6 +68,21 @@
 - 是否允许清理；
 - 验证结果。
 
+## 本地 Java 配置迁移记录（2026-09-29）
+
+- 已从 `ai-resume-service/snowy-web-app/src/main/resources/application-local.yml` 迁移本地 MySQL 连接参数和微信 OAuth 应用/回调配置，并从 `application.yml` 迁移 DeepSeek 与火山方舟 AI 配置到 Node 仓库根目录的本地 `.env`。具体值不记录在仓库；`.env` 已由 `.gitignore` 忽略。
+- Java `application.yml` 当前默认 profile 是 `prod`。Node 本地 `.env` 继续使用 `application-local.yml` 的本机 MySQL 配置，避免本地开发进程默认连入生产库；生产支付字段不进入本地配置。
+- `application-local.yml` 的 Redis 地址、端口和数据库号依赖 `SPRING_REDIS_*` 环境变量，但当前 shell、用户和机器环境均未提供这些变量；Node `.env` 暂用本机 `127.0.0.1:6379/2`，连接可用性尚未验证。
+- 微信支付强制使用 `PAYMENT_MODE=mock`，未迁移商户密钥或证书；测试登录、管理员登录和证件照卡死记录补偿保持关闭。
+- Java 配置中未找到可映射的腾讯云 COS 凭据，Node `.env` 的 COS 项保持空值。COS 操作需在本地或预发布环境安全注入专用凭据后再验收。
+- 本次仅完成配置文件迁移和格式/变量名覆盖检查，未验证数据库、Redis、OAuth、AI provider 或 COS 连通性。Java 配置中的凭据是否仍有效未经确认；按上文 Secret hygiene 要求，在正式使用前应轮换历史上曾暴露的凭据。
+
+## 环境配置 Git 同步核对（2026-10-10）
+
+- 本地 `.env` 与已跟踪的 `.env.example` 变量名一致，没有遗漏的本地变量；示例文件保留安全默认值，凭据留空。
+- `.env` 继续由 Git 忽略，真实值通过本地安全备份或部署平台环境变量保存；仅拉取仓库不能恢复真实凭据。
+- 本次同步包含配置迁移记录，不代表数据库、Redis 或外部服务已通过连通性验收。
+
 ## 测试数据规则
 
 测试数据使用唯一前缀，例如：
@@ -81,6 +96,7 @@ codex_migration_test_
 ## 支付测试规则
 
 默认只创建测试订单并模拟或回放支付回调，不产生线上真实扣款。真实微信支付只在明确的测试商户环境中执行。
+
 ## Secret hygiene note
 
 本次迁移没有把用户提供的 DeepSeek 密钥写入 Node 源码、测试、构建产物或文档。对旧 Java 工程做静态扫描时发现历史文件中仍存在若干硬编码的 AI provider key；它们不是本次迁移新增内容，但在 Node 切换前应在对应供应商处轮换并从 Java 配置/源码中移除，Node 只通过环境变量读取新密钥。
@@ -88,6 +104,3 @@ codex_migration_test_
 本轮安全清理已将 `snowy-web-app/src/main/resources/application*.yml` 中的数据库、Redis、微信、OAuth、Stripe、豆包和后台统计凭据统一改为环境变量占位符；生产部署必须注入对应变量，仓库配置不再保存这些值。旧凭据已经暴露在历史文件中，切换前仍应在供应商侧轮换，不能把仓库中的旧值当作有效凭据继续使用。
 
 微信支付的 `p12`、证书和私钥也已从 Java 资源目录移除，配置改为 `WECHAT_PAY_CERT_P12_PATH`、`WECHAT_PAY_CERT_PATH`、`WECHAT_PAY_PRIVATE_KEY_PATH` 和 `WECHAT_PAY_CERT_SERIAL_NO`。证书只允许由预发布/生产部署系统挂载；在证书重新注入并完成签名验收前，Node 的 `PAYMENT_MODE=live` 继续拒绝请求。
-
-
-
