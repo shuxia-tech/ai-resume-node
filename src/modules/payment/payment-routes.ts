@@ -8,6 +8,19 @@ import { requireUser } from '@/auth/request-user.js';
 import type { AppEnv } from '@/config/env.js';
 import type { Database, MemberPackageRow } from '@/infrastructure/database.js';
 import { notifyPaymentWebSocket } from '@/modules/payment/payment-websocket.js';
+import {
+  buildJsapiPayParams,
+  chargeFen,
+  createOutTradeNo,
+  createUnifiedOrder,
+  parseWechatXml,
+  paymentNotifyUrl,
+  renderPayQr,
+  verifyWechatSign,
+  wechatClientIp,
+  wechatNotifyXml,
+  type WechatPayConfig,
+} from '@/modules/payment/wechat-pay.js';
 
 type PaymentBody = {
   packageId?: string;
@@ -78,6 +91,15 @@ async function findPackage(
 export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kysely<Database>) {
   const authenticate = requireUser(env);
 
+  function livePayConfig(): WechatPayConfig {
+    const appId = env.WECHAT_PAY_APP_ID;
+    const mchId = env.WECHAT_PAY_MCH_ID;
+    const mchKey = env.WECHAT_PAY_MCH_KEY;
+    const notifyUrl = env.WECHAT_PAY_NOTIFY_URL;
+    if (!appId || !mchId || !mchKey || !notifyUrl) throw new AppError(503, '微信支付未配置');
+    return { appId, mchId, mchKey, notifyUrl };
+  }
+
   async function createOrder(
     request: any,
     webName: string | undefined,
@@ -85,7 +107,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     qrResponse: boolean,
   ) {
     await authenticate(request);
-    if (env.PAYMENT_MODE !== 'mock') throw new AppError(501, '微信支付 live 模式尚未启用');
+    if (env.PAYMENT_MODE === 'live') return createLiveOrder(request, webName, reply, qrResponse);
     if (!env.TEST_AUTH_ENABLED || request.userId !== env.TEST_USER_ID)
       throw new AppError(403, '模拟支付只允许测试账号');
     const params = (request.params ?? {}) as { code?: string; packageId?: string };
@@ -149,6 +171,140 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
         );
     }
     return ok(result);
+  }
+
+  async function createLiveOrder(
+    request: any,
+    webName: string | undefined,
+    reply: FastifyReply | undefined,
+    qrResponse: boolean,
+  ) {
+    const config = livePayConfig();
+    const params = (request.params ?? {}) as { code?: string; packageId?: string };
+    const body = (request.body ?? {}) as { redeemCode?: string; packageId?: string };
+    const packageId = params.packageId ?? body.packageId;
+    if (!packageId) throw new AppError(400, 'packageId不能为空');
+    const memberPackage = await findPackage(db, packageId, webName);
+    if (
+      webName === 'photo' &&
+      memberPackage.billing_mode === 'COUNT_PACKAGE' &&
+      Number(memberPackage.usage_count ?? 0) <= 0
+    ) {
+      throw new AppError(400, 'AI证件照次数套餐未配置购买次数');
+    }
+    const userId = request.userId as string;
+    const payer = await db
+      .selectFrom('client_user')
+      .select(['wechat_openid', 'create_time'] as const)
+      .where('ID', '=', userId)
+      .where('DELETE_FLAG', '=', 'NOT_DELETE')
+      .executeTakeFirst();
+    if (!payer) throw new AppError(404, '用户不存在');
+    const redeemCode = params.code ?? body.redeemCode ?? '0';
+    const redeem =
+      redeemCode === '0'
+        ? undefined
+        : await db
+            .selectFrom('t_redeem_code')
+            .select(['code_id', 'member_package_id', 'ext_json'] as const)
+            .where('code', '=', redeemCode)
+            .where('delete_flag', '=', 'NOT_DELETE')
+            .where('expiration_time', '>', new Date())
+            .executeTakeFirst();
+    const rate = redeem ? Number(redeem.ext_json) : Number.NaN;
+    const redeemApplies = Boolean(
+      redeem &&
+      Number.isFinite(rate) &&
+      rate > 0 &&
+      rate <= 1 &&
+      (redeem.member_package_id
+        ? redeem.member_package_id === memberPackage.id
+        : memberPackage.id !== '1'),
+    );
+    const priced = chargeFen({
+      currentAmount: Number(memberPackage.current_amount),
+      packageId: memberPackage.id,
+      webName,
+      billingMode: memberPackage.billing_mode,
+      createdAt: payer.create_time,
+      redeemRate: Number.isFinite(rate) ? rate : null,
+      redeemApplies,
+    });
+    if (qrResponse === false && !payer.wechat_openid) {
+      throw new AppError(400, '当前用户未通过微信登录，无法使用 JSAPI 支付');
+    }
+    const outTradeNo = createOutTradeNo();
+    const orderId = randomUUID().replaceAll('-', '');
+    const openid = payer.wechat_openid ?? undefined;
+    const clientIp = wechatClientIp(request.ip);
+    await db
+      .insertInto('t_payment_order')
+      .values({
+        id: orderId,
+        delete_flag: 'NOT_DELETE',
+        create_time: new Date(),
+        update_time: new Date(),
+        pay_channel: '微信',
+        amount: priced.fen,
+        recharge_record_id: null,
+        order_no: outTradeNo,
+        status: '待支付',
+        openid: payer.wechat_openid,
+        product_id: memberPackage.id,
+        remark: webName ?? 'resume',
+        ip: clientIp,
+        code_url: null,
+        user_id: userId,
+        ext_json: JSON.stringify({
+          mode: 'live',
+          webName: webName ?? null,
+          redeemCodeId: priced.usedRedeem ? (redeem?.code_id ?? null) : null,
+        }),
+        redeem_code_id: priced.usedRedeem ? (redeem?.code_id ?? null) : null,
+      } as any)
+      .execute();
+    let unified: Awaited<ReturnType<typeof createUnifiedOrder>>;
+    try {
+      unified = await createUnifiedOrder({
+        config: { ...config, notifyUrl: paymentNotifyUrl(config.notifyUrl, webName) },
+        body: memberPackage.package_name,
+        outTradeNo,
+        totalFee: priced.fen,
+        ip: clientIp,
+        tradeType: qrResponse ? 'NATIVE' : 'JSAPI',
+        productId: memberPackage.id,
+        ...(openid ? { openid } : {}),
+      });
+    } catch (error) {
+      await db
+        .updateTable('t_payment_order')
+        .set({ status: '支付失败', update_time: new Date() })
+        .where('id', '=', orderId)
+        .execute();
+      throw error;
+    }
+    if (unified.codeUrl) {
+      await db
+        .updateTable('t_payment_order')
+        .set({ code_url: unified.codeUrl, update_time: new Date() })
+        .where('id', '=', orderId)
+        .execute();
+    }
+    if (qrResponse) {
+      if (!unified.codeUrl || !reply) throw new AppError(502, '微信支付未返回二维码');
+      const png = await renderPayQr(unified.codeUrl);
+      return reply.type('image/png').send(png);
+    }
+    if (!unified.prepayId) throw new AppError(502, '微信支付未返回预支付单号');
+    return ok({
+      orderId,
+      outTradeNo,
+      packageName: memberPackage.package_name,
+      amount: priced.fen / 100,
+      billingMode: memberPackage.billing_mode,
+      usageCount: memberPackage.usage_count,
+      jsapiParams: buildJsapiPayParams(config.appId, unified.prepayId, config.mchKey),
+    });
   }
 
   for (const [path, webName] of [
@@ -228,9 +384,8 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     async () => ok(null),
   );
 
-  async function callback(request: any, webName: string | undefined) {
-    if (env.PAYMENT_MODE !== 'mock')
-      throw new AppError(501, '微信支付 live 回调验签尚未启用，已拒绝处理');
+  async function callback(request: any, reply: FastifyReply, webName: string | undefined) {
+    if (env.PAYMENT_MODE === 'live') return handleLiveCallback(request, reply, webName);
     const payload = parseCallback(request.body);
     if (!payload.orderNo) throw new AppError(400, '缺少订单号');
     const orderNo = payload.orderNo;
@@ -290,14 +445,95 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     }
     return result.response;
   }
-  app.post('/c/resume/memberPackage/wxPayCallback', async (request) =>
-    callback(request, undefined),
+
+  async function handleLiveCallback(
+    request: any,
+    reply: FastifyReply,
+    webName: string | undefined,
+  ) {
+    const config = livePayConfig();
+    const xml = typeof request.body === 'string' ? request.body : '';
+    const notice = parseWechatXml(xml);
+    const reject = (message: string) =>
+      reply.type('text/xml').send(wechatNotifyXml(false, message));
+    if (
+      !verifyWechatSign(notice, config.mchKey) ||
+      notice.appid !== config.appId ||
+      notice.mch_id !== config.mchId
+    ) {
+      return reject('签名校验失败');
+    }
+    if (notice.return_code !== 'SUCCESS' || notice.result_code !== 'SUCCESS') {
+      return reject('支付结果未成功');
+    }
+    const orderNo = notice.out_trade_no;
+    const totalFee = Number(notice.total_fee);
+    if (!orderNo || !Number.isSafeInteger(totalFee)) return reject('通知缺少订单号或金额');
+    const result = await db.transaction().execute(async (trx) => {
+      const order = await trx
+        .selectFrom('t_payment_order')
+        .selectAll()
+        .where('order_no', '=', orderNo)
+        .where('delete_flag', '=', 'NOT_DELETE')
+        .forUpdate()
+        .executeTakeFirst();
+      if (!order) return { response: '订单不存在', changed: false, userId: undefined };
+      if (order.status === '支付成功')
+        return { response: 'OK', changed: false, userId: order.user_id };
+      if (!canApplyMockPaymentSuccess(order.status))
+        return { response: 'OK', changed: false, userId: order.user_id };
+      if (Number(order.amount) !== totalFee)
+        return { response: '金额不一致', changed: false, userId: undefined };
+      if (!order.product_id || !order.user_id)
+        return { response: '订单数据不完整', changed: false, userId: undefined };
+      const memberPackage = await findPackage(trx, order.product_id, webName);
+      const user = await trx
+        .selectFrom('client_user')
+        .select([
+          'member_expiration_time',
+          'offer_member_expiration_time',
+          'photo_member_expiration_time',
+        ] as any)
+        .where('ID', '=', order.user_id)
+        .where('DELETE_FLAG', '=', 'NOT_DELETE')
+        .forUpdate()
+        .executeTakeFirst();
+      if (!user) return { response: '用户不存在', changed: false, userId: undefined };
+      await grantPackage(trx, order.user_id, memberPackage, webName, user);
+      await trx
+        .updateTable('t_payment_order')
+        .set({
+          status: '支付成功',
+          update_time: new Date(),
+          openid: notice.openid ?? order.openid,
+          ext_json: JSON.stringify({
+            mode: 'live',
+            transactionId: notice.transaction_id ?? null,
+          }),
+        })
+        .where('id', '=', order.id)
+        .execute();
+      return { response: 'OK', changed: true, userId: order.user_id };
+    });
+    if (result.changed && result.userId) {
+      notifyPaymentWebSocket(result.userId, 'WxPay', {
+        code: 200,
+        success: true,
+        data: '支付成功',
+        msg: '操作成功',
+      });
+    }
+    return reply.type('text/xml').send(wechatNotifyXml(result.response === 'OK', result.response));
+  }
+
+  app.post('/c/resume/memberPackage/wxPayCallback', async (request, reply) =>
+    callback(request, reply, undefined),
   );
-  app.post('/c/resume/memberPackage/wxPayCallback/offer', async (request) =>
-    callback(request, 'offer'),
+  app.post('/c/resume/memberPackage/wxPayCallback/offer', async (request, reply) =>
+    callback(request, reply, 'offer'),
   );
-  app.post('/c/resume/memberPackage/wxPayCallback/photo', async (request) =>
-    callback(request, 'photo'),
+  app.post('/c/resume/memberPackage/wxPayCallback/photo', async (request, reply) =>
+    callback(request, reply, 'photo'),
   );
 }
 

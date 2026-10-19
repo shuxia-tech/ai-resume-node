@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
-import { requireUser } from '@/auth/request-user.js';
+import { readRedisSetSize, requireUser } from '@/auth/request-user.js';
 import { ok } from '@/common/http-response.js';
 import type { AppEnv } from '@/config/env.js';
 import type { Database } from '@/infrastructure/database.js';
@@ -26,6 +26,12 @@ function pageData<T>(records: T[], total: number, current: number, size: number)
 
 function numberValue(value: unknown) {
   return Number(value ?? 0);
+}
+
+function maskUserName(userName: string | null) {
+  if (!userName) return userName;
+  if (userName.length === 1) return userName;
+  return `${userName.charAt(0)}***`;
 }
 
 export function registerDistributionRoutes(
@@ -89,6 +95,10 @@ export function registerDistributionRoutes(
     const subRebate = numberValue(aggregate?.subReferralRebateRate);
     const total = inviteRebate + subRebate;
     const withdrawn = numberValue(user?.withdrawnRebateAmount);
+    const invitationCode = user?.invitationCode ?? null;
+    const ipCount = invitationCode
+      ? await readRedisSetSize(env, `InvitationUserList_${invitationCode}`)
+      : 0;
     let discountRebate = 0;
     if (redeem?.extJson) {
       try {
@@ -99,7 +109,7 @@ export function registerDistributionRoutes(
     }
     return ok({
       orderTotalCount: numberValue(aggregate?.orderTotalCount),
-      ipCount: 0,
+      ipCount,
       userCount: numberValue(relationCount?.count),
       inviteRechargeTotalAmount: numberValue(aggregate?.inviteRechargeTotalAmount),
       inviteRebateTotalAmount: inviteRebate,
@@ -160,52 +170,68 @@ export function registerDistributionRoutes(
     const current = pageValue(query.page, 1, 10_000);
     const size = pageValue(query.limit, 10, 100);
     const userId = request.userId as string;
-    let base = db
-      .selectFrom('t_front_relation as fr')
-      .innerJoin('client_user as cu', 'cu.ID', 'fr.target_id')
-      .leftJoin('t_recharge_record as rr', (join) =>
-        join.onRef('rr.user_id', '=', 'cu.ID').on('rr.delete_flag', '=', 'NOT_DELETE'),
-      )
-      .leftJoin('t_invitation_records as ir', (join) =>
-        join
-          .onRef('ir.target_user_id', '=', 'cu.ID')
-          .on('ir.user_id', '=', userId)
-          .on('ir.delete_flag', '=', 'NOT_DELETE'),
-      )
-      .select([
-        'cu.ID as userId',
-        'cu.NICKNAME as userName',
-        'cu.user_status as userStatus',
-        sql<string>`date_format(min(fr.create_time), '%Y-%m-%d %H:%i:%s')`.as('inviteTime'),
-        sql<number>`coalesce(sum(rr.amount / 100), 0)`.as('totalConsumption'),
-        sql<number>`coalesce(sum(ir.rebate_amount), 0)`.as('rebateAmount'),
-      ])
-      .where('fr.user_id', '=', userId)
-      .where('fr.category', 'in', ['用户优惠码关联', '用户邀请码关联'])
-      .where('cu.DELETE_FLAG', '=', 'NOT_DELETE')
-      .groupBy(['cu.ID', 'cu.NICKNAME', 'cu.user_status'])
-      .orderBy('rebateAmount', 'desc');
-    if (query.userNameKeyword?.trim())
-      base = base.where('cu.NAME', 'like', `%${query.userNameKeyword.trim()}%`) as typeof base;
-    const records = await base
-      .limit(size)
-      .offset((current - 1) * size)
-      .execute();
-    const count = await db
-      .selectFrom('t_front_relation as fr')
-      .innerJoin('client_user as cu', 'cu.ID', 'fr.target_id')
-      .select(sql<number>`count(distinct cu.ID)`.as('count'))
-      .where('fr.user_id', '=', userId)
-      .where('fr.category', 'in', ['用户优惠码关联', '用户邀请码关联'])
-      .where('cu.DELETE_FLAG', '=', 'NOT_DELETE')
-      .executeTakeFirst();
+    const keyword = query.userNameKeyword?.trim() ?? '';
+    const keywordFilter = keyword ? sql`AND cu.name LIKE ${`%${keyword}%`}` : sql``;
+    const records = await sql<{
+      userId: string;
+      userName: string | null;
+      totalConsumption: number | string | null;
+      rebateAmount: number | string | null;
+      inviteTime: string | null;
+      userStatus: string | null;
+    }>`
+      SELECT
+        cu.id AS userId,
+        cu.NICKNAME AS userName,
+        COALESCE(recharge_sum.totalConsumption, 0) AS totalConsumption,
+        COALESCE(rebate_sum.rebateAmount, 0) AS rebateAmount,
+        DATE_FORMAT(MIN(fr.create_time), '%Y-%m-%d %H:%i:%s') AS inviteTime,
+        cu.user_status AS userStatus
+      FROM client_user cu
+      INNER JOIN t_front_relation fr
+        ON fr.target_id = cu.id
+        AND fr.user_id = ${userId}
+        AND fr.category IN ('用户优惠码关联', '用户邀请码关联')
+      LEFT JOIN (
+        SELECT user_id, SUM(amount / 100) AS totalConsumption
+        FROM t_recharge_record
+        WHERE DELETE_FLAG = 'NOT_DELETE'
+        GROUP BY user_id
+      ) recharge_sum ON recharge_sum.user_id = cu.id
+      LEFT JOIN (
+        SELECT target_user_id, SUM(rebate_amount) AS rebateAmount
+        FROM t_invitation_records
+        WHERE user_id = ${userId}
+          AND DELETE_FLAG = 'NOT_DELETE'
+        GROUP BY target_user_id
+      ) rebate_sum ON rebate_sum.target_user_id = cu.id
+      WHERE cu.delete_flag = 'NOT_DELETE'
+        ${keywordFilter}
+      GROUP BY cu.id, cu.NICKNAME, cu.user_status, recharge_sum.totalConsumption, rebate_sum.rebateAmount
+      ORDER BY rebateAmount DESC
+      LIMIT ${size} OFFSET ${(current - 1) * size}
+    `.execute(db);
+    const count = await sql<{ count: number | string }>`
+      SELECT COUNT(DISTINCT cu.id) AS count
+      FROM client_user cu
+      INNER JOIN t_front_relation fr
+        ON fr.target_id = cu.id
+        AND fr.user_id = ${userId}
+        AND fr.category IN ('用户优惠码关联', '用户邀请码关联')
+      WHERE cu.delete_flag = 'NOT_DELETE'
+        ${keywordFilter}
+    `.execute(db);
     return ok(
       pageData(
-        records.map((record) => ({
-          ...record,
-          userName: record.userName ? `${String(record.userName).slice(0, 1)}***` : record.userName,
+        records.rows.map((record) => ({
+          userId: record.userId == null ? record.userId : String(record.userId),
+          userName: maskUserName(record.userName),
+          totalConsumption: numberValue(record.totalConsumption),
+          rebateAmount: numberValue(record.rebateAmount),
+          inviteTime: record.inviteTime,
+          userStatus: record.userStatus,
         })),
-        numberValue(count?.count),
+        numberValue(count.rows[0]?.count),
         current,
         size,
       ),

@@ -211,6 +211,26 @@ describe('foundation', () => {
     );
   });
 
+  it('uses defaults when bounded numeric settings are blank', () => {
+    const env = loadEnv({
+      ...baseEnv,
+      ADMIN_TOKEN_TTL_SECONDS: '',
+      CLIENT_TOKEN_TTL_SECONDS: '',
+      AI_REQUEST_TIMEOUT_MS: '',
+      AI_MAX_INPUT_LENGTH: '',
+      AI_MAX_OUTPUT_TOKENS: '',
+      PHOTO_COMPENSATION_INTERVAL_MS: '',
+      PHOTO_COMPENSATION_STALE_MINUTES: '',
+    });
+    expect(env.ADMIN_TOKEN_TTL_SECONDS).toBe(86_400);
+    expect(env.CLIENT_TOKEN_TTL_SECONDS).toBe(30 * 24 * 60 * 60);
+    expect(env.AI_REQUEST_TIMEOUT_MS).toBe(30_000);
+    expect(env.AI_MAX_INPUT_LENGTH).toBe(3_000);
+    expect(env.AI_MAX_OUTPUT_TOKENS).toBe(4_000);
+    expect(env.PHOTO_COMPENSATION_INTERVAL_MS).toBe(5 * 60 * 1000);
+    expect(env.PHOTO_COMPENSATION_STALE_MINUTES).toBe(15);
+  });
+
   it('treats blank optional URL settings as unset', () => {
     const env = loadEnv({
       ...baseEnv,
@@ -509,15 +529,65 @@ describe('foundation', () => {
     await app.close();
   });
 
-  it('fails closed for live payment callbacks until signature verification is enabled', async () => {
-    const app = buildApp(loadEnv({ ...baseEnv, PAYMENT_MODE: 'live' }));
+  it('allows PUT in the browser preflight for campus status updates', async () => {
+    const app = buildApp(loadEnv({ ...baseEnv, CORS_ORIGINS: 'http://localhost:3100' }));
+    const response = await app.inject({
+      method: 'OPTIONS',
+      url: '/c/resume/campusRecruitment/status',
+      headers: {
+        origin: 'http://localhost:3100',
+        'access-control-request-method': 'PUT',
+        'access-control-request-headers': 'token,content-type',
+      },
+    });
+    expect(response.statusCode).toBe(204);
+    expect(response.headers['access-control-allow-methods']).toContain('PUT');
+    expect(response.headers['access-control-allow-origin']).toBe('http://localhost:3100');
+    await app.close();
+  });
+
+  it('rejects a live payment callback when the WeChat signature does not match', async () => {
+    const app = buildApp(
+      loadEnv({
+        ...baseEnv,
+        PAYMENT_MODE: 'live',
+        WECHAT_PAY_APP_ID: 'wx-test-app',
+        WECHAT_PAY_MCH_ID: '1900000001',
+        WECHAT_PAY_MCH_KEY: 'test-mch-key',
+        WECHAT_PAY_NOTIFY_URL: 'https://api.example.com/pay/callback',
+      }),
+    );
     const response = await app.inject({
       method: 'POST',
       url: '/c/resume/memberPackage/wxPayCallback',
-      payload: { orderNo: 'not-processed' },
+      headers: { 'content-type': 'text/xml' },
+      payload:
+        '<xml><appid><![CDATA[wx-test-app]]></appid><mch_id><![CDATA[1900000001]]></mch_id><out_trade_no><![CDATA[not-processed]]></out_trade_no><sign><![CDATA[BAD]]></sign></xml>',
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain('FAIL');
+    expect(response.body).not.toContain('not-processed');
+    await app.close();
+  });
+
+  it('refuses a live order when WeChat Pay is not configured', async () => {
+    const app = buildApp(
+      loadEnv({
+        ...baseEnv,
+        PAYMENT_MODE: 'live',
+        TEST_AUTH_ENABLED: 'true',
+        TEST_USER_ID: 'pay-user',
+        TEST_AUTH_TOKEN: 'pay-token',
+      }),
+    );
+    const response = await app.inject({
+      method: 'POST',
+      url: '/c/resume/memberPackage/createJSAPIOrder',
+      headers: { token: 'pay-token' },
+      payload: { packageId: 'pkg', redeemCode: '0' },
     });
     expect(response.statusCode).toBe(500);
-    expect(response.json()).toMatchObject({ code: 501, success: false });
+    expect(response.json()).toMatchObject({ code: 503, success: false });
     await app.close();
   });
 

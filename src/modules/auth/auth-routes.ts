@@ -5,6 +5,7 @@ import { AppError } from '@/common/errors.js';
 import { ok } from '@/common/http-response.js';
 import {
   deleteClientToken,
+  readAuthCache,
   requireUser,
   requestToken,
   saveClientToken,
@@ -148,24 +149,108 @@ async function findOrCreateWechatUser(db: Kysely<Database>, profile: WechatProfi
   return id;
 }
 
-function mapUser(user: any) {
+function flag(value: unknown): boolean {
+  if (Buffer.isBuffer(value)) return value.length > 0 && value[0] !== 0;
+  return value === true || value === 1 || value === '1';
+}
+
+function decimalOrNull(value: unknown): number | null {
+  if (value == null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function flagOrNull(value: unknown): boolean | null {
+  if (value == null || value === '') return null;
+  return flag(value);
+}
+
+function numberOrNull(value: unknown): number | null {
+  if (value == null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function column(user: Record<string, unknown>, ...names: string[]) {
+  for (const name of names) {
+    if (user[name] !== undefined) return user[name];
+  }
+  return undefined;
+}
+
+function extJsonObject(value: unknown) {
+  if (typeof value !== 'string' || value.trim() === '') return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function shanghaiDay(now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+}
+
+function mapUser(
+  user: Record<string, unknown>,
+  flags: { hasSignedIn: boolean; weeklyQuestionnaireFlag: boolean },
+) {
+  const extJson = column(user, 'EXT_JSON', 'ext_json') ?? null;
+  const userStatus = column(user, 'USER_STATUS', 'user_status') ?? null;
   return {
-    id: user.ID,
-    account: user.ACCOUNT,
-    nickname: user.NICKNAME,
-    name: user.NAME,
-    avatar: user.AVATAR,
-    signature: user.SIGNATURE,
-    phone: user.PHONE,
-    email: user.EMAIL,
-    memberLevel: user.member_level,
-    memberExpirationTime: user.member_expiration_time,
-    offerMemberExpirationTime: user.offer_member_expiration_time,
-    photoMemberExpirationTime: user.photo_member_expiration_time,
-    unionId: user.union_id,
-    wechatOpenid: user.wechat_openid,
-    createTime: user.create_time,
-    extJson: user.EXT_JSON,
+    id: column(user, 'ID', 'id'),
+    avatar: column(user, 'AVATAR', 'avatar') ?? null,
+    signature: column(user, 'SIGNATURE', 'signature') ?? null,
+    account: column(user, 'ACCOUNT', 'account') ?? null,
+    name: column(user, 'NAME', 'name') ?? null,
+    nickname: column(user, 'NICKNAME', 'nickname') ?? null,
+    phone: column(user, 'PHONE', 'phone') ?? null,
+    email: column(user, 'EMAIL', 'email') ?? null,
+    lastLoginIp: column(user, 'LAST_LOGIN_IP', 'last_login_ip') ?? null,
+    lastLoginAddress: column(user, 'LAST_LOGIN_ADDRESS', 'last_login_address') ?? null,
+    lastLoginTime: column(user, 'LAST_LOGIN_TIME', 'last_login_time') ?? null,
+    lastLoginDevice: column(user, 'LAST_LOGIN_DEVICE', 'last_login_device') ?? null,
+    latestLoginIp: column(user, 'LATEST_LOGIN_IP', 'latest_login_ip') ?? null,
+    latestLoginAddress: column(user, 'LATEST_LOGIN_ADDRESS', 'latest_login_address') ?? null,
+    latestLoginTime: column(user, 'LATEST_LOGIN_TIME', 'latest_login_time') ?? null,
+    latestLoginDevice: column(user, 'LATEST_LOGIN_DEVICE', 'latest_login_device') ?? null,
+    consumeMagic: null,
+    residualMagic: null,
+    dayMagic: null,
+    invitationCode: column(user, 'invitation_code') ?? null,
+    memberLevel: column(user, 'member_level') ?? null,
+    memberExpirationTime: column(user, 'member_expiration_time') ?? null,
+    userStatus,
+    sortCode: numberOrNull(column(user, 'SORT_CODE', 'sort_code')),
+    extJson,
+    extJsonObj: extJsonObject(extJson),
+    buttonCodeList: null,
+    mobileButtonCodeList: null,
+    permissionCodeList: null,
+    roleCodeList: null,
+    password: null,
+    hasSignedIn: flags.hasSignedIn,
+    firstQuestionnaireFlag: flagOrNull(column(user, 'first_questionnaire_flag')),
+    invitationRebateRate: decimalOrNull(column(user, 'invitation_rebate_rate')),
+    weeklyQuestionnaireFlag: flags.weeklyQuestionnaireFlag,
+    createTime: column(user, 'CREATE_TIME', 'create_time') ?? null,
+    hasUseInvitationCode: null,
+    hasDistributionPromoCode: flag(column(user, 'has_distribution_promo_code')),
+    hasPublishCases: flag(column(user, 'has_publish_cases')),
+    shareFreeMember: numberOrNull(column(user, 'share_free_member')),
+    unionId: column(user, 'union_id') ?? null,
+    offerMemberExpirationTime: column(user, 'offer_member_expiration_time') ?? null,
+    photoMemberExpirationTime: column(user, 'photo_member_expiration_time') ?? null,
+    withdrawnRebateAmount: decimalOrNull(column(user, 'withdrawn_rebate_amount')),
+    hasOfferDistributionRebate: flag(column(user, 'has_offer_distribution_rebate')),
+    wechatOpenid: column(user, 'wechat_openid') ?? null,
+    enabled: userStatus === 'ENABLE',
   };
 }
 
@@ -224,7 +309,17 @@ export function registerAuthRoutes(app: FastifyInstance, env: AppEnv, db: Kysely
       .where('DELETE_FLAG', '=', 'NOT_DELETE')
       .executeTakeFirst();
     if (!user) throw new AppError(404, '用户不存在');
-    return ok(mapUser(user));
+    const userId = request.userId as string;
+    const [signedIn, weeklyQuestionnaire] = await Promise.all([
+      readAuthCache(env, `HasSignedIn_${shanghaiDay()}_${userId}`),
+      readAuthCache(env, `WeeklyQuestionnaireFlag_${userId}`),
+    ]);
+    return ok(
+      mapUser(user as Record<string, unknown>, {
+        hasSignedIn: signedIn !== null,
+        weeklyQuestionnaireFlag: weeklyQuestionnaire !== null,
+      }),
+    );
   }
   app.get('/auth/c/getLoginUser', { preHandler: authenticate }, currentUser);
   app.get('/auth/c/getLoginUser/offer', { preHandler: authenticate }, currentUser);

@@ -70,6 +70,22 @@ export async function pingAuthRedis(env: AppEnv): Promise<void> {
   await getRedis(env).ping();
 }
 
+export async function readAuthCache(env: AppEnv, key: string): Promise<string | null> {
+  try {
+    return await getRedis(env).get(key);
+  } catch {
+    return null;
+  }
+}
+
+export async function readRedisSetSize(env: AppEnv, key: string): Promise<number> {
+  try {
+    return await getRedis(env).scard(key);
+  } catch {
+    return 0;
+  }
+}
+
 declare module 'fastify' {
   interface FastifyRequest {
     userId: string | undefined;

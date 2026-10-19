@@ -18,41 +18,37 @@ const optionalHex = z.preprocess(
     .optional(),
 );
 
+function positiveIntFromEnv(fallback: number, max?: number) {
+  const schema = z.coerce.number().int().positive();
+  const bounded = max === undefined ? schema : schema.max(max);
+  return z.preprocess((value) => (value === '' ? undefined : value), bounded.default(fallback));
+}
+
 export const MIN_DOUBAO_OUTPUT_PIXELS = 3_686_400;
 
 const envSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-    PORT: z.coerce.number().int().positive().default(8823),
+    PORT: positiveIntFromEnv(8823),
     LOG_LEVEL: z
       .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
       .default('info'),
     CORS_ORIGINS: z.string().default('http://localhost:3000,http://localhost:3200'),
     DATABASE_HOST: z.string().min(1),
-    DATABASE_PORT: z.coerce.number().int().positive().default(3306),
+    DATABASE_PORT: positiveIntFromEnv(3306),
     DATABASE_NAME: z.string().min(1),
     DATABASE_USER: z.string().min(1),
     DATABASE_PASSWORD: z.string(),
-    DATABASE_CONNECTION_LIMIT: z.coerce.number().int().positive().max(100).default(10),
+    DATABASE_CONNECTION_LIMIT: positiveIntFromEnv(10, 100),
     REDIS_URL: z.string().url(),
-    REDIS_MAX_CONNECTIONS: z.coerce.number().int().positive().max(100).default(16),
+    REDIS_MAX_CONNECTIONS: positiveIntFromEnv(16, 100),
     TEST_AUTH_ENABLED: booleanFromEnv,
     TEST_USER_ID: z.string().optional(),
     TEST_AUTH_TOKEN: z.string().optional(),
     ADMIN_LOGIN_ENABLED: booleanFromEnv,
     ADMIN_SM2_PRIVATE_KEY: optionalHex,
-    ADMIN_TOKEN_TTL_SECONDS: z.coerce
-      .number()
-      .int()
-      .positive()
-      .max(7 * 24 * 60 * 60)
-      .default(86_400),
-    CLIENT_TOKEN_TTL_SECONDS: z.coerce
-      .number()
-      .int()
-      .positive()
-      .max(90 * 24 * 60 * 60)
-      .default(30 * 24 * 60 * 60),
+    ADMIN_TOKEN_TTL_SECONDS: positiveIntFromEnv(86_400, 7 * 24 * 60 * 60),
+    CLIENT_TOKEN_TTL_SECONDS: positiveIntFromEnv(30 * 24 * 60 * 60, 90 * 24 * 60 * 60),
     TENCENT_COS_SECRET_ID: z.string().optional(),
     TENCENT_COS_SECRET_KEY: z.string().optional(),
     TENCENT_COS_REGION: z.string().optional(),
@@ -91,22 +87,12 @@ const envSchema = z
       .string()
       .regex(/^\d+x\d+$/)
       .default('2048x2048'),
-    AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().max(120_000).default(30_000),
-    AI_MAX_INPUT_LENGTH: z.coerce.number().int().positive().max(100_000).default(3_000),
-    AI_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().max(12_000).default(4_000),
+    AI_REQUEST_TIMEOUT_MS: positiveIntFromEnv(30_000, 120_000),
+    AI_MAX_INPUT_LENGTH: positiveIntFromEnv(3_000, 100_000),
+    AI_MAX_OUTPUT_TOKENS: positiveIntFromEnv(4_000, 12_000),
     PHOTO_COMPENSATION_ENABLED: booleanFromEnv,
-    PHOTO_COMPENSATION_INTERVAL_MS: z.coerce
-      .number()
-      .int()
-      .positive()
-      .max(7 * 24 * 60 * 60 * 1000)
-      .default(5 * 60 * 1000),
-    PHOTO_COMPENSATION_STALE_MINUTES: z.coerce
-      .number()
-      .int()
-      .positive()
-      .max(7 * 24 * 60)
-      .default(15),
+    PHOTO_COMPENSATION_INTERVAL_MS: positiveIntFromEnv(5 * 60 * 1000, 7 * 24 * 60 * 60 * 1000),
+    PHOTO_COMPENSATION_STALE_MINUTES: positiveIntFromEnv(15, 7 * 24 * 60),
   })
   .superRefine((data, context) => {
     const [width, height] = data.DOUBAO_IMAGE_SIZE.split('x').map(Number);

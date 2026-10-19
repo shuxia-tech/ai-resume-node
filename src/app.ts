@@ -6,9 +6,11 @@ import multipart from '@fastify/multipart';
 import { loadEnv, type AppEnv } from '@/config/env.js';
 import { AppError } from '@/common/errors.js';
 import { fail, ok } from '@/common/http-response.js';
+import { formatPayloadDates } from '@/common/java-date.js';
 import { createDatabase } from '@/infrastructure/database.js';
 import { registerResumeRoutes } from '@/modules/resume/resume-routes.js';
 import { registerAiRoutes } from '@/modules/ai/ai-routes.js';
+import { bindCosConfigDatabase } from '@/modules/storage/cos-service.js';
 import { registerStorageRoutes } from '@/modules/storage/storage-routes.js';
 import { registerCampusRoutes } from '@/modules/campus/campus-routes.js';
 import { registerDictRoutes } from '@/modules/admin/dict-routes.js';
@@ -32,7 +34,11 @@ export function buildApp(env: AppEnv = loadEnv()): FastifyInstance {
   const corsOrigins = env.CORS_ORIGINS.split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);
-  app.register(cors, { origin: corsOrigins, credentials: true });
+  app.register(cors, {
+    origin: corsOrigins,
+    credentials: true,
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  });
   app.register(helmet);
   app.register(sensible);
   app.register(multipart, { limits: { fileSize: 20 * 1024 * 1024, files: 1 } });
@@ -59,8 +65,22 @@ export function buildApp(env: AppEnv = loadEnv()): FastifyInstance {
     { parseAs: 'string' },
     (_request, payload, done) => done(null, payload),
   );
+  // WeChat Pay v2 posts the payment result as XML.
+  const parseXmlBody = (
+    _request: unknown,
+    payload: string,
+    done: (error: Error | null, body?: string) => void,
+  ) => done(null, payload);
+  app.addContentTypeParser('text/xml', { parseAs: 'string' }, parseXmlBody);
+  app.addContentTypeParser('application/xml', { parseAs: 'string' }, parseXmlBody);
+
+  app.addHook('preSerialization', async (_request, _reply, payload) => {
+    if (payload == null || typeof payload !== 'object') return payload;
+    return formatPayloadDates(payload);
+  });
 
   const database = createDatabase(env);
+  bindCosConfigDatabase(database);
   registerResumeRoutes(app, env, database);
   registerAiRoutes(app, env, database);
   registerStorageRoutes(app, env);

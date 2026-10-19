@@ -44,6 +44,7 @@ type ResumeQuery = {
   limit?: string;
   isPublished?: string;
   keyword?: string;
+  templateTag?: string;
 };
 
 type BodyRecord = Record<string, unknown>;
@@ -125,29 +126,84 @@ async function listResumes(
 ) {
   const page = pageValue(query.page, 1, 10_000);
   const limit = pageValue(query.limit, 10, 100);
+  const keyword = query.keyword?.trim() ?? '';
+  const templateTag = query.templateTag?.trim() ?? '';
+  // Public /templates ignores the userId query, matching the Java controller.
+  // Keyword matches title or tag. Sort by update time so recently edited templates stay first.
   let builder = db
-    .selectFrom('sc_resume')
-    .select(resumeColumns)
-    .where('delete_flag', '=', 'NOT_DELETE')
-    .where('is_published', '=', published ? 1 : 0)
-    .orderBy('update_time', 'desc')
+    .selectFrom('sc_resume as r')
+    .leftJoin('sc_resume_tags as rt', 'rt.resume_id', 'r.id')
+    .distinct()
+    .select(resumeColumns.map((column) => `r.${column}` as never))
+    .where('r.delete_flag', '=', 'NOT_DELETE')
+    .where('r.is_published', '=', published ? 1 : 0)
+    .orderBy('r.update_time', 'desc')
     .limit(limit)
     .offset((page - 1) * limit);
-  if (userId) builder = builder.where('user_id', '=', userId);
-  if (query.keyword) builder = builder.where('title', 'like', `%${query.keyword}%`);
-  const records = await builder.execute();
+  if (userId) builder = builder.where('r.user_id', '=', userId);
+  if (keyword) {
+    builder = builder.where((expression) =>
+      expression.or([
+        expression('r.title', 'like', `%${keyword}%`),
+        expression('rt.tag_name', 'like', `%${keyword}%`),
+      ]),
+    );
+  }
+  if (templateTag) builder = builder.where('rt.tag_name', '=', templateTag);
+  const records = (await builder.execute()).map((row) =>
+    mapResumeListItem(row as Record<string, unknown>),
+  );
   let countBuilder = db
-    .selectFrom('sc_resume')
-    .select(sql<number>`count(*)`.as('count'))
-    .where('delete_flag', '=', 'NOT_DELETE')
-    .where('is_published', '=', published ? 1 : 0);
-  if (userId) countBuilder = countBuilder.where('user_id', '=', userId);
-  if (query.keyword) countBuilder = countBuilder.where('title', 'like', `%${query.keyword}%`);
+    .selectFrom('sc_resume as r')
+    .leftJoin('sc_resume_tags as rt', 'rt.resume_id', 'r.id')
+    .select(sql<number>`count(distinct r.id)`.as('count'))
+    .where('r.delete_flag', '=', 'NOT_DELETE')
+    .where('r.is_published', '=', published ? 1 : 0);
+  if (userId) countBuilder = countBuilder.where('r.user_id', '=', userId);
+  if (keyword) {
+    countBuilder = countBuilder.where((expression) =>
+      expression.or([
+        expression('r.title', 'like', `%${keyword}%`),
+        expression('rt.tag_name', 'like', `%${keyword}%`),
+      ]),
+    );
+  }
+  if (templateTag) countBuilder = countBuilder.where('rt.tag_name', '=', templateTag);
   const count = await countBuilder.executeTakeFirst();
   return ok(pageResponse(records, Number(count?.count ?? 0), page, limit));
 }
 
-async function listMemberPackages(db: Kysely<Database>, category: string) {
+function discountAmount(amount: number, rate: number): number {
+  const cents = Math.round(amount * 100);
+  const rateThousandths = Math.round(rate * 1000);
+  return Math.round((cents * rateThousandths) / 1000) / 100;
+}
+
+function applyPackageDiscount<
+  T extends {
+    id: string;
+    currentAmount: number | string;
+    originalAmount: number | string | null;
+    billingMode: string | null;
+  },
+>(packages: T[], rate: number, memberPackageId: string | null) {
+  return packages.map((item) => {
+    const applies = memberPackageId ? memberPackageId === item.id : item.id !== '1';
+    if (!applies) return item;
+    const currentAmount = Number(item.currentAmount);
+    return {
+      ...item,
+      originalAmount: currentAmount,
+      currentAmount: discountAmount(currentAmount, rate),
+    };
+  });
+}
+
+async function listMemberPackages(
+  db: Kysely<Database>,
+  category: string,
+  options?: { code?: string; userId?: string },
+) {
   const packages = await db
     .selectFrom('sc_member_package')
     .select([
@@ -168,9 +224,49 @@ async function listMemberPackages(db: Kysely<Database>, category: string) {
     ] as const)
     .where('delete_flag', '=', 'NOT_DELETE')
     .where('ext_json', '=', category)
-    .orderBy('sort', 'asc')
+    .orderBy('sort', 'desc')
     .orderBy('id', 'asc')
     .execute();
+
+  const code = options?.code?.trim();
+  if (code && code !== '0') {
+    const redeem = await db
+      .selectFrom('t_redeem_code')
+      .select(['member_package_id', 'ext_json', 'max_redemption', 'current_redemption', 'user_id'] as const)
+      .where('code', '=', code)
+      .where('delete_flag', '=', 'NOT_DELETE')
+      .where('expiration_time', '>', new Date())
+      .executeTakeFirst();
+    const rate = Number(redeem?.ext_json);
+    const usable =
+      Boolean(redeem) &&
+      (redeem?.max_redemption ?? 0) > (redeem?.current_redemption ?? 0) &&
+      !(redeem?.user_id && redeem.user_id === options?.userId) &&
+      Number.isFinite(rate);
+    if (usable && redeem) {
+      return ok(applyPackageDiscount(packages, rate, redeem.member_package_id));
+    }
+  }
+
+  if (options?.userId) {
+    const user = await db
+      .selectFrom('client_user')
+      .select(['create_time'] as const)
+      .where('ID', '=', options.userId)
+      .where('DELETE_FLAG', '=', 'NOT_DELETE')
+      .executeTakeFirst();
+    const createdAt = user?.create_time;
+    if (createdAt instanceof Date && Date.now() < createdAt.getTime() + 72 * 60 * 60 * 1000) {
+      const discounted = applyPackageDiscount(
+        packages.filter((item) => item.billingMode !== 'COUNT_PACKAGE'),
+        0.8,
+        null,
+      );
+      const discountedById = new Map(discounted.map((item) => [item.id, item]));
+      return ok(packages.map((item) => discountedById.get(item.id) ?? item));
+    }
+  }
+
   return ok(packages);
 }
 
@@ -186,15 +282,42 @@ function mapResume(row: Record<string, unknown>) {
     isPublished: bool(row.isPublished as number | boolean | null),
     publishDate: row.publishDate,
     previewImage: row.previewImage,
-    viewCount: row.viewCount,
     usageCount: row.usageCount,
     collectCount: row.collectCount,
     createTime: row.createTime,
     updateTime: row.updateTime,
-    deleteFlag: row.deleteFlag,
     styleConfig: row.styleConfig,
     publishId: row.publishId,
     template: row.template,
+  };
+}
+
+// The Java list query selects a subset of columns and leaves the VO fields
+// tags/isCollect/styleConfig/publishId unset, so Jackson sends them as null.
+function mapResumeListItem(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    title: row.title,
+    userId: row.userId,
+    isPublished: bool(row.isPublished as number | boolean | null),
+    publishDate: row.publishDate ?? null,
+    publishId: null,
+    previewImage: row.previewImage ?? null,
+    usageCount: row.usageCount ?? 0,
+    collectCount: row.collectCount ?? 0,
+    createTime: row.createTime ?? null,
+    updateTime: row.updateTime ?? null,
+    styleConfig: null,
+    template: row.template ?? null,
+    tags: null,
+    isCollect: null,
+  };
+}
+
+function mapResumeModule(row: Record<string, unknown>) {
+  return {
+    ...row,
+    hasEnable: bool(row.hasEnable as number | boolean | null),
   };
 }
 
@@ -226,6 +349,13 @@ export async function assertResumeCreationAllowed(db: Kysely<Database>, userId: 
 
 export function registerResumeRoutes(app: FastifyInstance, env: AppEnv, db: Kysely<Database>) {
   const authenticate = requireUser(env);
+  const optionalUser: typeof authenticate = async (request) => {
+    try {
+      await authenticate(request);
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 401) throw error;
+    }
+  };
 
   app.post('/c/resume/webError', async (request) => {
     const body = request.body;
@@ -258,7 +388,13 @@ export function registerResumeRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
       .where('delete_flag', '=', 'NOT_DELETE')
       .orderBy('create_time', 'asc')
       .execute();
-    return ok(categories);
+    return ok(
+      categories.map((item) => ({
+        ...item,
+        isCategory: bool(item.isCategory as number | boolean | null),
+        deleteFlag: 'NOT_DELETE',
+      })),
+    );
   });
 
   app.get<{ Querystring: { code?: string; webName?: string } }>(
@@ -271,20 +407,25 @@ export function registerResumeRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
           : request.query.webName === 'offer'
             ? 'offer星球'
             : '高分简历';
-      return listMemberPackages(db, category);
+      return listMemberPackages(db, category, {
+        code: request.query.code,
+        userId: request.userId,
+      });
     },
   );
 
   app.get<{ Querystring: { code?: string } }>(
     '/c/resume/memberPackage/offer',
     { preHandler: authenticate },
-    async () => listMemberPackages(db, 'offer星球'),
+    async (request) =>
+      listMemberPackages(db, 'offer星球', { code: request.query.code, userId: request.userId }),
   );
 
   app.get<{ Querystring: { code?: string } }>(
     '/c/resume/memberPackage/photo',
     { preHandler: authenticate },
-    async () => listMemberPackages(db, 'AI证件照'),
+    async (request) =>
+      listMemberPackages(db, 'AI证件照', { code: request.query.code, userId: request.userId }),
   );
 
   app.get<{ Params: { code: string } }>(
@@ -451,7 +592,6 @@ export function registerResumeRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
 
   app.get<{ Querystring: ResumeQuery }>(
     '/c/resume/templates',
-    { preHandler: authenticate },
     async (request) => listResumes(db, request.query, true),
   );
 
@@ -495,7 +635,9 @@ export function registerResumeRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
         .orderBy('r.update_time', 'desc')
         .limit(limit)
         .offset((page - 1) * limit);
-      const records = await query.execute();
+      const records = (await query.execute()).map((row) =>
+        mapResumeListItem(row as Record<string, unknown>),
+      );
       const count = await db
         .selectFrom('sc_resume as r')
         .innerJoin('sc_user_actions as a', 'a.resume_id', 'r.id')
@@ -864,6 +1006,7 @@ export function registerResumeRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
         .where('delete_flag', '=', 'NOT_DELETE')
         .orderBy('display_order', 'asc')
         .execute();
+      const resumeModules = modules.map((item) => mapResumeModule(item as Record<string, unknown>));
 
       const action = await db
         .selectFrom('sc_user_actions')
@@ -874,13 +1017,13 @@ export function registerResumeRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
         .where('delete_flag', '=', 'NOT_DELETE')
         .executeTakeFirst();
 
-      return ok({ ...mapResume(resume), resumeModules: modules, hasCollect: Boolean(action) });
+      return ok({ ...mapResume(resume), resumeModules, hasCollect: Boolean(action) });
     },
   );
 
   app.get<{ Params: { resumeId: string } }>(
     '/c/resume/:resumeId/baseInfo',
-    { preHandler: authenticate },
+    { preHandler: optionalUser },
     async (request) => {
       const resume = await db
         .selectFrom('sc_resume')
@@ -903,29 +1046,32 @@ export function registerResumeRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
         ])
         .where('id', '=', request.params.resumeId)
         .where('delete_flag', '=', 'NOT_DELETE')
-        .where(({ or, eb }) =>
-          or([eb('user_id', '=', request.userId as string), eb('is_published', '=', 1)]),
-        )
         .executeTakeFirst();
 
       if (!resume) throw new AppError(400, '简历不存在');
 
       const tags = await db
         .selectFrom('sc_resume_tags')
-        .select('tag_name as tagName')
+        .select('tag_name')
         .where('resume_id', '=', request.params.resumeId)
         .execute();
 
-      const action = await db
-        .selectFrom('sc_user_actions')
-        .select('id')
-        .where('resume_id', '=', request.params.resumeId)
-        .where('user_id', '=', request.userId ?? '')
-        .where('action_type', '=', '收藏')
-        .where('delete_flag', '=', 'NOT_DELETE')
-        .executeTakeFirst();
+      const action = request.userId
+        ? await db
+            .selectFrom('sc_user_actions')
+            .select('id')
+            .where('resume_id', '=', request.params.resumeId)
+            .where('user_id', '=', request.userId)
+            .where('action_type', '=', '收藏')
+            .where('delete_flag', '=', 'NOT_DELETE')
+            .executeTakeFirst()
+        : undefined;
 
-      return ok({ ...mapResume(resume), tags, isCollect: Boolean(action) });
+      return ok({
+        ...mapResume(resume as Record<string, unknown>),
+        tags: tags.map((item) => item.tag_name),
+        isCollect: Boolean(action),
+      });
     },
   );
 }
