@@ -421,6 +421,8 @@ export type Database = {
   sc_ai_photo_generation_record: AiPhotoGenerationRow;
 };
 
+const querySocketTimeoutMs = 8_000;
+
 export function createDatabase(env: AppEnv): Kysely<Database> {
   const pool = mysql.createPool({
     host: env.DATABASE_HOST,
@@ -431,8 +433,19 @@ export function createDatabase(env: AppEnv): Kysely<Database> {
     connectionLimit: env.DATABASE_CONNECTION_LIMIT,
     waitForConnections: true,
     enableKeepAlive: true,
+    keepAliveInitialDelay: 10_000,
+    connectTimeout: 5_000,
     decimalNumbers: true,
     timezone: 'Z',
+  });
+
+  pool.on('connection', (connection) => {
+    const stream = connection.stream as { setTimeout?: (ms: number) => void; on?: Function } | undefined;
+    if (!stream?.setTimeout || !stream.on) return;
+    stream.setTimeout(querySocketTimeoutMs);
+    stream.on('timeout', () => {
+      connection.destroy();
+    });
   });
 
   return new Kysely<Database>({

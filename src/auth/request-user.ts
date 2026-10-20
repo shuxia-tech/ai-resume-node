@@ -11,10 +11,70 @@ function getRedis(env: AppEnv): Redis {
       maxRetriesPerRequest: 1,
       enableOfflineQueue: false,
       lazyConnect: false,
+      connectTimeout: 5_000,
+      commandTimeout: 5_000,
     });
     redisClient.on('error', () => undefined);
   }
   return redisClient;
+}
+
+function redisUnavailable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("Stream isn't writeable") ||
+    message.includes('Connection is closed') ||
+    message.includes('ECONNREFUSED') ||
+    message.includes('ETIMEDOUT') ||
+    message.includes('Command timed out')
+  );
+}
+
+async function whenRedisReady(redis: Redis): Promise<void> {
+  if (redis.status === 'ready') return;
+  if (redis.status === 'wait' || redis.status === 'end' || redis.status === 'close') {
+    try {
+      await redis.connect();
+    } catch {
+      // A reconnect may already be in progress.
+    }
+  }
+  if (redis.status === 'ready') return;
+  await new Promise<void>((resolve, reject) => {
+    if (redis.status === 'ready') {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new AppError(503, '登录状态服务暂时不可用，请稍后重试'));
+    }, 4_000);
+    const onReady = () => {
+      cleanup();
+      resolve();
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      redis.off('ready', onReady);
+    };
+    redis.once('ready', onReady);
+  });
+}
+
+async function writeRedis<T>(env: AppEnv, task: (redis: Redis) => Promise<T>): Promise<T> {
+  const run = async (redis: Redis) => {
+    await whenRedisReady(redis);
+    return task(redis);
+  };
+  try {
+    return await run(getRedis(env));
+  } catch (error) {
+    if (error instanceof AppError || !redisUnavailable(error)) throw error;
+    const current = redisClient;
+    redisClient = undefined;
+    current?.disconnect();
+    return run(getRedis(env));
+  }
 }
 
 export function requestToken(request: FastifyRequest): string | undefined {
@@ -51,23 +111,31 @@ export async function resolveAdminToken(env: AppEnv, token: string): Promise<str
 }
 
 export async function saveAdminToken(env: AppEnv, token: string, userId: string): Promise<void> {
-  await getRedis(env).set(`token:B:token:${token}`, userId, 'EX', env.ADMIN_TOKEN_TTL_SECONDS);
+  await writeRedis(env, (redis) =>
+    redis.set(`token:B:token:${token}`, userId, 'EX', env.ADMIN_TOKEN_TTL_SECONDS),
+  );
 }
 
 export async function deleteAdminToken(env: AppEnv, token: string): Promise<void> {
-  await getRedis(env).del(`token:B:token:${token}`);
+  await writeRedis(env, (redis) => redis.del(`token:B:token:${token}`));
 }
 
 export async function saveClientToken(env: AppEnv, token: string, userId: string): Promise<void> {
-  await getRedis(env).set(`token:C:token:${token}`, userId, 'EX', env.CLIENT_TOKEN_TTL_SECONDS);
+  await writeRedis(env, (redis) =>
+    redis.set(`token:C:token:${token}`, userId, 'EX', env.CLIENT_TOKEN_TTL_SECONDS),
+  );
 }
 
 export async function deleteClientToken(env: AppEnv, token: string): Promise<void> {
-  await getRedis(env).del(`token:C:token:${token}`);
+  await writeRedis(env, (redis) => redis.del(`token:C:token:${token}`));
 }
 
 export async function pingAuthRedis(env: AppEnv): Promise<void> {
   await getRedis(env).ping();
+}
+
+export function authRedis(env: AppEnv): Redis {
+  return getRedis(env);
 }
 
 export async function readAuthCache(env: AppEnv, key: string): Promise<string | null> {

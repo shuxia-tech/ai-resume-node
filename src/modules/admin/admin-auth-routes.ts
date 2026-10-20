@@ -1,6 +1,6 @@
 import { timingSafeEqual, randomBytes } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import type { Kysely } from 'kysely';
+import { sql, type Kysely } from 'kysely';
 import smCrypto from 'sm-crypto';
 import {
   resolveAdminToken,
@@ -12,6 +12,7 @@ import { AppError } from '@/common/errors.js';
 import { ok } from '@/common/http-response.js';
 import type { AppEnv } from '@/config/env.js';
 import type { Database } from '@/infrastructure/database.js';
+import { buildLoginMenu } from '@/modules/admin/admin-menu.js';
 
 type LoginBody = {
   account?: string;
@@ -24,34 +25,6 @@ declare module 'fastify' {
     adminId: string | undefined;
   }
 }
-
-const migratedMenu = [
-  {
-    id: 'node-admin',
-    name: 'nodeAdmin',
-    path: '/nodeAdmin',
-    component: '',
-    meta: { title: '业务管理', type: 'module', icon: 'setting-outlined' },
-    children: [
-      {
-        id: 'node-admin-home',
-        name: 'index',
-        path: '/index',
-        component: 'index/index',
-        meta: { title: '首页', type: 'menu', icon: 'bank-outlined', affix: true },
-        children: [],
-      },
-      {
-        id: 'node-admin-dict',
-        name: 'dict',
-        path: '/biz/dict',
-        component: 'biz/dict/index',
-        meta: { title: '字典管理', type: 'menu', icon: 'tags-outlined' },
-        children: [],
-      },
-    ],
-  },
-];
 
 function sameSecret(actual: string | null, expected: string) {
   if (!actual) return false;
@@ -114,10 +87,32 @@ function mapAdmin(user: Record<string, unknown>) {
 export function registerAdminAuthRoutes(app: FastifyInstance, env: AppEnv, db: Kysely<Database>) {
   const adminGuard = requireAdmin(env, db);
 
-  // Snowy loads this public bootstrap endpoint before an administrator has a
-  // session. The migrated admin does not expose the old configuration center,
-  // so return an empty safe set instead of making the login page fail.
-  app.get('/dev/config/sysBaseList', async () => ok([]));
+  // The login page reads this before a session exists. Returning an empty list
+  // makes the admin fall back to /img/logo.png, which this host does not serve.
+  app.get('/dev/config/sysBaseList', async () => {
+    const rows = await sql<{
+      id: string;
+      configKey: string;
+      configValue: string | null;
+      category: string | null;
+      sortCode: number | null;
+    }>`
+      SELECT ID AS id, CONFIG_KEY AS configKey, CONFIG_VALUE AS configValue,
+             CATEGORY AS category, SORT_CODE AS sortCode
+      FROM dev_config
+      WHERE DELETE_FLAG = 'NOT_DELETE' AND CATEGORY = 'SYS_BASE'
+      ORDER BY SORT_CODE ASC, ID ASC
+    `.execute(db);
+    return ok(
+      rows.rows.map((row) => ({
+        ...row,
+        configValue:
+          row.configKey === 'SNOWY_SYS_DEFAULT_PASSWORD'
+            ? '*'.repeat(String(row.configValue ?? '').length)
+            : row.configValue,
+      })),
+    );
+  });
 
   app.post<{ Body: LoginBody }>('/auth/b/doLogin', async (request) => {
     if (!env.ADMIN_LOGIN_ENABLED) {
@@ -162,7 +157,10 @@ export function registerAdminAuthRoutes(app: FastifyInstance, env: AppEnv, db: K
     return ok(mapAdmin(user));
   });
 
-  app.get('/sys/userCenter/loginMenu', { preHandler: adminGuard }, async () => ok(migratedMenu));
+  app.get('/sys/userCenter/loginMenu', { preHandler: adminGuard }, async (request) => {
+    if (!request.adminId) throw new AppError(401, '管理员登录状态已失效');
+    return ok(await buildLoginMenu(db, request.adminId));
+  });
 
   app.get('/auth/b/doLogout', { preHandler: adminGuard }, async (request) => {
     const token = requestToken(request);

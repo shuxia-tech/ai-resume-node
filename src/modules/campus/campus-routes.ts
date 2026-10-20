@@ -166,7 +166,8 @@ export function registerCampusRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
 
   async function visibleCampusQuery(userId: string | undefined, query: CampusQuery): Promise<CampusQuery> {
     if (await isOfferMember(userId)) return query;
-    return { ...query, page: '1', keyword: undefined };
+    const { keyword: _keyword, ...rest } = query;
+    return { ...rest, page: '1' };
   }
 
   async function listRecruitments(query: CampusQuery, infoType: '校招' | '内推', userId?: string) {
@@ -300,8 +301,11 @@ export function registerCampusRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
       );
     if (query.recruitmentStatus)
       base = base.where('cru.recruitment_status', '=', query.recruitmentStatus) as typeof base;
-    if (query.startDate && query.endDate)
-      base = base.where(sql`cr.record_time BETWEEN ${query.startDate} AND ${query.endDate}`) as typeof base;
+    if (query.startDate && query.endDate) {
+      base = base.where(
+        sql`cr.record_time BETWEEN ${query.startDate} AND ${query.endDate}` as any,
+      ) as typeof base;
+    }
     if (query.keyword)
       base = base.where((eb: any) =>
         eb.or([

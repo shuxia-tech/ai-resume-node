@@ -15,6 +15,11 @@ import { registerStorageRoutes } from '@/modules/storage/storage-routes.js';
 import { registerCampusRoutes } from '@/modules/campus/campus-routes.js';
 import { registerDictRoutes } from '@/modules/admin/dict-routes.js';
 import { registerAdminAuthRoutes } from '@/modules/admin/admin-auth-routes.js';
+import { registerGaAdminRoutes } from '@/modules/admin/ga-routes.js';
+import { registerClientUserAdminRoutes } from '@/modules/admin/client-user-routes.js';
+import { registerAdminAppRoutes } from '@/modules/admin/admin-app-routes.js';
+import { registerAdminFeatureRoutes } from '@/modules/admin/admin-feature-routes.js';
+import { registerCampusCircleRoutes } from '@/modules/campus-circle/campus-routes.js';
 import { registerDistributionRoutes } from '@/modules/distribution/distribution-routes.js';
 import { registerAdSlotRoutes } from '@/modules/ad-slot/ad-slot-routes.js';
 import { registerNotificationRoutes } from '@/modules/notification/notification-routes.js';
@@ -87,6 +92,11 @@ export function buildApp(env: AppEnv = loadEnv()): FastifyInstance {
   registerCampusRoutes(app, env, database);
   registerDictRoutes(app, env, database);
   registerAdminAuthRoutes(app, env, database);
+  registerGaAdminRoutes(app, env, database);
+  registerClientUserAdminRoutes(app, env, database);
+  registerAdminAppRoutes(app, env, database);
+  registerAdminFeatureRoutes(app, env, database);
+  registerCampusCircleRoutes(app, env, database);
   registerDistributionRoutes(app, env, database);
   registerAdSlotRoutes(app, env, database);
   registerNotificationRoutes(app, env, database);
@@ -139,6 +149,7 @@ export function buildApp(env: AppEnv = loadEnv()): FastifyInstance {
     request.log.error(
       {
         requestId: request.id,
+        err: error,
         errorName: error instanceof Error ? error.name : 'UnknownError',
         errorCodeDetail:
           error && typeof error === 'object' && 'code' in error ? String(error.code) : undefined,

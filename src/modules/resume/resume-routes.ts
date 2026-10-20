@@ -202,7 +202,7 @@ function applyPackageDiscount<
 async function listMemberPackages(
   db: Kysely<Database>,
   category: string,
-  options?: { code?: string; userId?: string },
+  options?: { code?: string | undefined; userId?: string | undefined },
 ) {
   const packages = await db
     .selectFrom('sc_member_package')
