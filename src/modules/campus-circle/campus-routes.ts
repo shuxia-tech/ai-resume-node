@@ -1,5 +1,7 @@
+import { createReadStream } from 'node:fs';
+import { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { requireUser } from '@/auth/request-user.js';
+import { readAuthCache, requestToken, requireUser } from '@/auth/request-user.js';
 import { AppError } from '@/common/errors.js';
 import { ok } from '@/common/http-response.js';
 import type { AppEnv } from '@/config/env.js';
@@ -51,15 +53,56 @@ import {
   submitProfile,
   submitProject,
   submitRating,
+  identityVerification,
   submitVerification,
+  submitVip,
   todayContacts,
   unlockContact,
   uploadCampusFile,
 } from '@/modules/campus-circle/campus-domain.js';
 import {
+  adminCaseList,
+  adminDemandList,
+  adminMaterialList,
+  adminProviderList,
+  advertisingImageFile,
+  advertisingImportKeys,
+  advertisingRecords,
+  commitAdvertisingImport,
+  devFileTarget,
+  materialFile,
+  myDemands,
+  myMaterials,
+  myProvider,
+  providerImageFile,
+  publicDemandContact,
+  publicDemandDetail,
+  publicDemandPage,
+  publishedCases,
+  publishedMaterials,
+  reviewAdvertisingClaim,
+  reviewDemand,
+  reviewMaterial,
+  reviewProvider,
+  saveCase,
+  saveMaterial,
+  submitAdvertisingClaim,
+  submitDemand,
+  submitProvider,
+  uploadAdvertisingImage,
+  uploadMaterial,
+  uploadOfficialMaterial,
+  uploadProviderImage,
+  withdrawDemand,
+  type UploadFile,
+} from '@/modules/campus-circle/campus-marketplace.js';
+import {
   CampusError,
   assertCampusCsrf,
+  campus,
+  campusAdminToken,
   guardRepeat,
+  loadCampusAdminSession,
   sendCampusError,
   text,
   writeCampusCookie,
@@ -86,6 +129,63 @@ function mark(request: FastifyRequest, reply: FastifyReply) {
   if (!request.url.includes('/campus-circle/public/')) {
     reply.header('Cache-Control', 'private, no-store');
     reply.header('Pragma', 'no-cache');
+  }
+}
+
+async function optionalClient(env: AppEnv, request: FastifyRequest): Promise<string | null> {
+  const token = requestToken(request);
+  if (!token) return null;
+  if (env.TEST_AUTH_ENABLED && token === env.TEST_AUTH_TOKEN) {
+    request.userId = env.TEST_USER_ID;
+    return env.TEST_USER_ID ?? null;
+  }
+  const userId = (await readAuthCache(env, `token:C:token:${token}`)) || (await readAuthCache(env, `token:token:${token}`));
+  if (!userId) return null;
+  request.userId = userId;
+  return userId;
+}
+
+async function adminOnline(env: AppEnv, request: FastifyRequest) {
+  try {
+    return Boolean(await loadCampusAdminSession(env, campusAdminToken(request)));
+  } catch {
+    return false;
+  }
+}
+
+async function readUpload(request: FastifyRequest) {
+  const fields: Record<string, string> = {};
+  let file: UploadFile | undefined;
+  for await (const part of request.parts()) {
+    if (part.type === 'file') {
+      if (!file) file = { filename: part.filename, mimetype: part.mimetype, buffer: await part.toBuffer() };
+    } else {
+      fields[part.fieldname] = text(part.value);
+    }
+  }
+  return { fields, file };
+}
+
+function attachment(filename: string, extension: string) {
+  const encoded = encodeURIComponent(filename).replace(/\+/g, '%20');
+  return `attachment; filename="download.${extension}"; filename*=UTF-8''${encoded}`;
+}
+
+function sendBytes(reply: FastifyReply, bytes: Buffer, contentType: string, disposition?: string) {
+  reply.header('Content-Type', contentType);
+  reply.header('X-Content-Type-Options', 'nosniff');
+  reply.header('Cache-Control', 'private, no-store');
+  if (disposition) reply.header('Content-Disposition', disposition);
+  return reply.send(bytes);
+}
+
+async function guarded(reply: FastifyReply, task: () => Promise<unknown>) {
+  try {
+    return await task();
+  } catch (error) {
+    if (error instanceof CampusError) return sendCampusError(reply, error);
+    if (error instanceof AppError) throw error;
+    throw error;
   }
 }
 
@@ -263,5 +363,145 @@ export function registerCampusCircleRoutes(app: FastifyInstance, env: AppEnv, db
   route('post', '/app/campus-circle/settings/staff/save', { role: 'ADMIN', csrf: true }, async (request) => {
     const session = await requireCampusAdmin(db, env, request, undefined, 'ADMIN');
     return saveStaff(db, env, request, session, bodyOf(request));
+  });
+
+  const projectPage = '/app/campus-circle/project/page';
+  const projectReview = '/app/campus-circle/project/review';
+
+  route('get', '/c/campus-circle/verification/identity', { user: true }, async (request) => identityVerification(db, request.userId ?? ''));
+  route('post', '/c/campus-circle/vip/submit', { user: true, repeatMs: 1500 }, async (request) => submitVip(db, env, request.userId ?? '', bodyOf(request)));
+  route('get', '/c/campus-circle/public/demand/page', {}, async (request) => publicDemandPage(db, queryOf(request)));
+  route('get', '/c/campus-circle/public/demand/detail', {}, async (request) => publicDemandDetail(db, text(queryOf(request).id)));
+  route('post', '/c/campus-circle/public/demand/contact', {}, async (request) => publicDemandContact(db, text(bodyOf(request).id)));
+  route('get', '/c/campus-circle/demand/mine', { user: true }, async (request) => myDemands(db, request.userId ?? ''));
+  route('post', '/c/campus-circle/demand/submit', { user: true, repeatMs: 1500 }, async (request) => submitDemand(db, request.userId ?? '', bodyOf(request)));
+  route('post', '/c/campus-circle/demand/withdraw', { user: true, repeatMs: 800 }, async (request) => withdrawDemand(db, request.userId ?? '', bodyOf(request)));
+  route('get', '/c/campus-circle/public/material/list', {}, async () => publishedMaterials(db));
+  route('get', '/c/campus-circle/material/mine', { user: true }, async (request) => myMaterials(db, request.userId ?? ''));
+  route('get', '/c/campus-circle/public/case/list', {}, async () => publishedCases(db));
+  route('get', '/c/campus-circle/provider/mine', { user: true }, async (request) => myProvider(db, request.userId ?? ''));
+  route('post', '/c/campus-circle/provider/submit', { user: true, repeatMs: 1500 }, async (request) => submitProvider(db, request.userId ?? '', bodyOf(request)));
+  route('get', '/c/campus-circle/public/advertising/records', {}, async (request) => advertisingRecords(db, await optionalClient(env, request), false));
+  route('get', '/c/campus-circle/advertising/import-keys', { user: true }, async (request) => advertisingImportKeys(db, request.userId ?? ''));
+  route('post', '/c/campus-circle/advertising/claims', { user: true, repeatMs: 1500 }, async (request) =>
+    submitAdvertisingClaim(db, request.userId ?? '', bodyOf(request)),
+  );
+  route('post', '/c/campus-circle/advertising/imports/commit', { user: true, repeatMs: 1500 }, async (request) =>
+    commitAdvertisingImport(db, request.userId ?? '', bodyOf(request)),
+  );
+
+  admin('get', '/app/campus-circle/demand/page', projectPage, async () => adminDemandList(db));
+  admin('post', '/app/campus-circle/demand/review', projectReview, async (request) => {
+    const session = await requireCampusAdmin(db, env, request, projectReview);
+    return reviewDemand(db, session.id, bodyOf(request));
+  });
+  admin('get', '/app/campus-circle/case/page', projectPage, async () => adminCaseList(db));
+  admin('post', '/app/campus-circle/case/save', projectReview, async (request) => {
+    const session = await requireCampusAdmin(db, env, request, projectReview);
+    return saveCase(db, session.id, bodyOf(request));
+  });
+  admin('get', '/app/campus-circle/advertising/page', projectPage, async () => advertisingRecords(db, null, true));
+  admin('post', '/app/campus-circle/advertising/review', projectReview, async (request) => {
+    const session = await requireCampusAdmin(db, env, request, projectReview);
+    await reviewAdvertisingClaim(db, session.id, bodyOf(request));
+    return null;
+  });
+  admin('get', '/app/campus-circle/provider/page', projectPage, async () => adminProviderList(db));
+  admin('post', '/app/campus-circle/provider/review', projectReview, async (request) => {
+    const session = await requireCampusAdmin(db, env, request, projectReview);
+    return reviewProvider(db, session.id, bodyOf(request));
+  });
+  admin('get', '/app/campus-circle/material/page', projectPage, async () => adminMaterialList(db));
+  admin('post', '/app/campus-circle/material/review', projectReview, async (request) => reviewMaterial(db, bodyOf(request)));
+  admin('post', '/app/campus-circle/material/save', projectReview, async (request) => {
+    const session = await requireCampusAdmin(db, env, request, projectReview);
+    return saveMaterial(db, session.id, bodyOf(request));
+  });
+
+  app.get('/c/campus-circle/public/material/download', async (request, reply) => {
+    mark(request, reply);
+    return guarded(reply, async () => {
+      const file = await materialFile(db, text(queryOf(request).id), await optionalClient(env, request), false);
+      return sendBytes(reply, file.bytes, file.contentType, attachment(file.filename ?? 'download', file.extension ?? 'ppt'));
+    });
+  });
+  app.get('/app/campus-circle/material/download', async (request, reply) => {
+    mark(request, reply);
+    return guarded(reply, async () => {
+      await requireCampusAdmin(db, env, request, projectPage);
+      const file = await materialFile(db, text(queryOf(request).id), null, true);
+      return sendBytes(reply, file.bytes, file.contentType, attachment(file.filename ?? 'download', file.extension ?? 'ppt'));
+    });
+  });
+  app.post('/c/campus-circle/material/upload', async (request, reply) => {
+    mark(request, reply);
+    return guarded(reply, async () => {
+      await requireUser(env)(request);
+      const upload = await readUpload(request);
+      return ok(await uploadMaterial(db, request.userId ?? '', upload.fields, upload.file));
+    });
+  });
+  app.post('/app/campus-circle/material/upload', async (request, reply) => {
+    mark(request, reply);
+    return guarded(reply, async () => {
+      await assertCampusCsrf(env, request);
+      const session = await requireCampusAdmin(db, env, request, projectReview);
+      const upload = await readUpload(request);
+      return ok(await uploadOfficialMaterial(db, session.id, upload.fields, upload.file));
+    });
+  });
+  app.post('/c/campus-circle/provider/images', async (request, reply) => {
+    mark(request, reply);
+    return guarded(reply, async () => {
+      await requireUser(env)(request);
+      const upload = await readUpload(request);
+      return ok(await uploadProviderImage(db, request.userId ?? '', upload.file));
+    });
+  });
+  app.post('/c/campus-circle/advertising/images', async (request, reply) => {
+    mark(request, reply);
+    return guarded(reply, async () => {
+      await requireUser(env)(request);
+      const upload = await readUpload(request);
+      return ok(await uploadAdvertisingImage(db, request.userId ?? '', upload.file));
+    });
+  });
+  app.get('/c/campus-circle/public/provider/images', async (request, reply) => {
+    mark(request, reply);
+    return guarded(reply, async () => {
+      const file = await providerImageFile(db, text(queryOf(request).id), await optionalClient(env, request), await adminOnline(env, request));
+      return sendBytes(reply, file.bytes, file.contentType);
+    });
+  });
+  app.get('/c/campus-circle/public/advertising/images', async (request, reply) => {
+    mark(request, reply);
+    return guarded(reply, async () => {
+      const file = await advertisingImageFile(db, text(queryOf(request).id), await optionalClient(env, request), await adminOnline(env, request));
+      return sendBytes(reply, file.bytes, file.contentType);
+    });
+  });
+  app.get('/dev/file/download', async (request, reply) => {
+    mark(request, reply);
+    return guarded(reply, async () => {
+      await requireUser(env)(request);
+      const id = text(queryOf(request).id);
+      const target = await devFileTarget(db, id);
+      reply.header('X-Content-Type-Options', 'nosniff');
+      reply.header('Cache-Control', 'private, no-store');
+      if (target.kind === 'http') {
+        let response: Response;
+        try {
+          response = await fetch(target.url, { redirect: 'follow', signal: AbortSignal.timeout(20_000) });
+        } catch {
+          throw campus(500, `图片读取或传输失败，id值为：${id}`);
+        }
+        if (!response.ok || !response.body) throw campus(500, `图片读取或传输失败，id值为：${id}`);
+        const type = response.headers.get('content-type')?.split(';')[0]?.trim();
+        reply.header('Content-Type', type || target.mime);
+        return reply.send(Readable.fromWeb(response.body));
+      }
+      reply.header('Content-Type', target.mime);
+      return reply.send(createReadStream(target.path));
+    });
   });
 }

@@ -15,6 +15,7 @@ import { registerStorageRoutes } from '@/modules/storage/storage-routes.js';
 import { registerCampusRoutes } from '@/modules/campus/campus-routes.js';
 import { registerDictRoutes } from '@/modules/admin/dict-routes.js';
 import { registerAdminAuthRoutes } from '@/modules/admin/admin-auth-routes.js';
+import { registerAdminMenuRoutes } from '@/modules/admin/admin-menu-routes.js';
 import { registerGaAdminRoutes } from '@/modules/admin/ga-routes.js';
 import { registerClientUserAdminRoutes } from '@/modules/admin/client-user-routes.js';
 import { registerAdminAppRoutes } from '@/modules/admin/admin-app-routes.js';
@@ -92,6 +93,7 @@ export function buildApp(env: AppEnv = loadEnv()): FastifyInstance {
   registerCampusRoutes(app, env, database);
   registerDictRoutes(app, env, database);
   registerAdminAuthRoutes(app, env, database);
+  registerAdminMenuRoutes(app, env, database);
   registerGaAdminRoutes(app, env, database);
   registerClientUserAdminRoutes(app, env, database);
   registerAdminAppRoutes(app, env, database);

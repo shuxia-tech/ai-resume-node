@@ -6,6 +6,7 @@ import { requireUser } from '@/auth/request-user.js';
 import type { AppEnv } from '@/config/env.js';
 import type { Database } from '@/infrastructure/database.js';
 import { generateAiText, parseJsonOrText, sanitizeAiHtml } from '@/modules/ai/ai-service.js';
+import { buildResumeImportPrompt, IMPORT_MODULE_SLOTS, parseImportedModules } from '@/modules/ai/resume-import.js';
 import {
   assertResumeCreationAllowed,
   DEFAULT_MODULE_TYPES,
@@ -286,24 +287,12 @@ const importModuleTypes = [
 
 async function importModules(env: AppEnv, text: string) {
   if (!text) throw new AppError(400, '文件解析失败，找不到内容');
-  const answer = await generateAiText(
-    env,
-    `请将以下简历文本整理成 JSON 数组。每项必须包含 moduleType 和 moduleContent，moduleType 只能使用：${importModuleTypes.join('、')}；moduleContent 输出对象。只输出 JSON。\n${text}`,
-  );
-  const parsed = parseJsonOrText(answer);
-  if (!Array.isArray(parsed)) throw new AppError(502, 'AI 未返回有效的简历模块 JSON');
-  return parsed
-    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-    .map((item) => ({
-      moduleType:
-        typeof item.moduleType === 'string' && importModuleTypes.includes(item.moduleType)
-          ? item.moduleType
-          : '其他经历',
-      moduleContent:
-        typeof item.moduleContent === 'string'
-          ? item.moduleContent
-          : JSON.stringify(item.moduleContent ?? item),
-    }));
+  const answer = await generateAiText(env, buildResumeImportPrompt(text), {
+    disableThinking: true,
+    maxInputLength: Math.max(env.AI_MAX_INPUT_LENGTH, 16_000),
+    maxOutputTokens: Math.max(env.AI_MAX_OUTPUT_TOKENS, 8_000),
+  });
+  return parseImportedModules(answer);
 }
 
 export function registerAiRoutes(app: FastifyInstance, env: AppEnv, db: Kysely<Database>) {
@@ -521,13 +510,13 @@ export function registerAiRoutes(app: FastifyInstance, env: AppEnv, db: Kysely<D
     const imported = await importModules(env, text);
     const now = new Date();
     const resumeId = randomUUID().replaceAll('-', '');
-    const modules = importModuleTypes.map((moduleType, index) => {
-      const found = imported.find((item) => item.moduleType === moduleType);
+    const modules = IMPORT_MODULE_SLOTS.map((slot) => {
+      const found = imported.find((item) => item.moduleType === slot.moduleType);
       return {
         id: randomUUID().replaceAll('-', ''),
         resume_id: resumeId,
-        module_type: moduleType,
-        display_order: index + 1,
+        module_type: slot.moduleType,
+        display_order: slot.displayOrder,
         module_content: found?.moduleContent ?? '{}',
         create_time: now,
         update_time: now,

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   chargeFen,
   parseWechatXml,
+  readWechatOrderQuery,
   signWechatParams,
   verifyWechatSign,
   wechatNotifyXml,
@@ -67,5 +68,39 @@ describe('wechat pay', () => {
         redeemApplies: true,
       }),
     ).toEqual({ fen: 995, usedRedeem: true });
+  });
+
+  it('accepts a signed WeChat order query and rejects a bad signature', () => {
+    const config = { appId: 'wx-photo', mchId: '1900000109', mchKey: 'photo-mch-key' };
+    const fields = {
+      return_code: 'SUCCESS',
+      result_code: 'SUCCESS',
+      appid: config.appId,
+      mch_id: config.mchId,
+      trade_state: 'SUCCESS',
+      total_fee: '990',
+      openid: 'openid-photo',
+      transaction_id: '4200000001',
+    };
+    const signed = { ...fields, sign: signWechatParams(fields, config.mchKey) };
+    expect(readWechatOrderQuery(signed, config)).toMatchObject({
+      tradeState: 'SUCCESS',
+      totalFee: 990,
+      openid: 'openid-photo',
+      transactionId: '4200000001',
+    });
+    expect(() => readWechatOrderQuery({ ...signed, sign: 'BAD' }, config)).toThrow(
+      '同步订单失败：微信支付响应验签失败',
+    );
+    expect(() =>
+      readWechatOrderQuery(
+        {
+          return_code: 'SUCCESS',
+          result_code: 'FAIL',
+          err_code_des: '订单不存在',
+        },
+        config,
+      ),
+    ).toThrow('同步订单失败：订单不存在');
   });
 });

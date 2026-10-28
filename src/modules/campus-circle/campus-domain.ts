@@ -1081,6 +1081,7 @@ function verificationResult(row: Row) {
     id: cellText(row, 'id'),
     profileId: cellText(row, 'profile_id'),
     identityType: cellText(row, 'identity_type'),
+    purpose: cellText(row, 'purpose'),
     realName: sm4Decrypt(row.real_name),
     orgName: cellText(row, 'org_name'),
     grade: cellText(row, 'grade'),
@@ -1101,8 +1102,27 @@ export async function myVerification(db: CampusDb, userId: string) {
   return latest ? verificationResult(latest) : null;
 }
 
+async function identityVerificationRow(db: CampusDb, userId: string) {
+  return queryOne(
+    db,
+    sql`SELECT * FROM sc_campus_verification
+        WHERE delete_flag = 'NOT_DELETE' AND user_id = ${userId}
+          AND (purpose IS NULL OR purpose <> 'VIP' OR status = ${APPROVED})
+        ORDER BY version_no DESC LIMIT 1`,
+  );
+}
+
+export async function identityVerification(db: CampusDb, userId: string) {
+  const row = await identityVerificationRow(db, userId);
+  return row ? verificationResult(row) : null;
+}
+
 async function requireApprovedVerification(db: CampusDb, userId: string) {
-  const latest = await latestVerification(db, userId);
+  let latest = await latestVerification(db, userId);
+  if (latest && cellText(latest, 'purpose') === 'VIP' && cellText(latest, 'status') !== APPROVED) {
+    const identity = await identityVerificationRow(db, userId);
+    if (identity) latest = identity;
+  }
   if (!latest) throw campus(121002, '请先完成身份认证');
   if (cellText(latest, 'status') === PENDING) throw campus(121003, '身份认证正在审核中');
   if (cellText(latest, 'status') !== APPROVED) throw campus(121004, '身份认证未通过');
@@ -1156,6 +1176,66 @@ export async function submitVerification(db: CampusDb, env: AppEnv, userId: stri
       version: 0,
     };
     await insertRow(db, 'sc_campus_verification', created);
+    return verificationId;
+  });
+}
+
+export async function submitVip(db: CampusDb, env: AppEnv, userId: string, body: Record<string, unknown>) {
+  const profile = await profileByUser(db, userId);
+  const mine = await myProfile(db, userId);
+  const roleType = cellText(profile, 'role_type') ?? '';
+  const name = (mine?.name ?? '').trim();
+  const orgName = (mine?.orgName ?? '').trim();
+  const wechat = (mine?.wechat ?? '').trim();
+  if (!profile || !mine || !ROLE_TYPES.has(roleType) || name.length < 2 || orgName.length < 2 || wechat.length < 3) {
+    throw campus(121010, '请先保存基本资料，再申请 VIP');
+  }
+  if (isVipActive(profile)) throw campus(121009, 'VIP 已开通，无需重复申请');
+  return withLock(env, `campus-circle:verification:submit:${userId}`, 3000, 15, '认证正在提交，请稍后重试', async () => {
+    const latest = await latestVerification(db, userId);
+    if (latest && cellText(latest, 'status') === PENDING) {
+      const message = cellText(latest, 'purpose') === 'VIP' ? 'VIP 申请审核中，无需重复提交' : '认证正在审核中，请勿重复提交';
+      throw campus(121009, message);
+    }
+    const approved = await identityVerificationRow(db, userId);
+    const matching = Boolean(
+      approved &&
+        cellText(approved, 'status') === APPROVED &&
+        roleType === cellText(approved, 'identity_type') &&
+        orgName === (cellText(approved, 'org_name') ?? '').trim(),
+    );
+    const reuse = body.reuseApprovedProof === true;
+    if (reuse && !matching) throw campus(121009, '可复用认证资料已变化，请刷新后重新核对');
+    let realName = reuse ? (sm4Decrypt(approved?.real_name) ?? '').trim() : text(body.realName);
+    let description = reuse ? (cellText(approved, 'proof_desc') ?? '').trim() : text(body.proofDesc);
+    const proofFileId = reuse ? cellText(approved, 'proof_file_id') : optionalText(body.proofFileId);
+    if (realName.length < 2 || realName.length > 40 || description.length > 500 || (!proofFileId && description.length < 5)) {
+      throw campus(121010, '请填写负责人姓名，并提供核验说明或证明图片');
+    }
+    if (!description) description = '已上传认证图片，请核验附件。';
+    if (proofFileId) await claimOwnedFile(db, userId, FILE_VERIFICATION, proofFileId);
+    const verificationId = newId();
+    await insertRow(db, 'sc_campus_verification', {
+      ...stamp(userId),
+      id: verificationId,
+      user_id: userId,
+      profile_id: cellText(profile, 'id'),
+      version_no: latest ? cellNumber(latest, 'version_no') + 1 : 1,
+      purpose: 'VIP',
+      identity_type: roleType,
+      real_name: sm4Encrypt(realName),
+      org_name: orgName,
+      grade: mine.grade || null,
+      proof_desc: description,
+      proof_file_id: proofFileId,
+      wechat: sm4Encrypt(wechat),
+      status: PENDING,
+      reject_reason: null,
+      submitted_time: new Date(),
+      review_time: null,
+      review_user_id: null,
+      version: 0,
+    });
     return verificationId;
   });
 }
@@ -1223,6 +1303,17 @@ export async function reviewVerification(db: CampusDb, operatorId: string, body:
   if (action === PASS && cellText(profile, 'role_type') !== cellText(verification, 'identity_type')) {
     throw campus(121006, '认证身份与当前名片身份不一致');
   }
+  const grantVip = action === PASS && cellText(verification, 'purpose') === 'VIP';
+  if (grantVip) {
+    const revision = await queryOne(
+      db,
+      sql`SELECT org_name FROM sc_campus_profile_revision
+          WHERE delete_flag = 'NOT_DELETE' AND id = ${cellText(profile, 'latest_revision_id')} LIMIT 1`,
+    );
+    if ((cellText(revision, 'org_name') ?? '').trim() !== (cellText(verification, 'org_name') ?? '').trim()) {
+      throw campus(121010, '身份或机构已变化，请退回后让用户重新提交');
+    }
+  }
   const afterStatus = action === PASS ? APPROVED : REJECTED;
   const now = new Date();
   await db.transaction().execute(async (trx) => {
@@ -1235,6 +1326,11 @@ export async function reviewVerification(db: CampusDb, operatorId: string, body:
           WHERE id = ${id} AND version = ${version} AND delete_flag = 'NOT_DELETE'`,
     );
     if (updated !== 1) throw campus(121009, '认证申请已被其他运营人员更新');
+    if (grantVip) {
+      await sql`UPDATE sc_campus_profile
+                SET vip_flag = 1, vip_expire_time = NULL, version = version + 1, update_time = ${now}, update_user = ${operatorId}
+                WHERE id = ${cellText(profile, 'id')}`.execute(trx);
+    }
     if (action === REVOKE) {
       await sql`UPDATE sc_campus_profile
                 SET vip_flag = 0, vip_expire_time = NULL, version = version + 1, update_time = ${now}, update_user = ${operatorId}

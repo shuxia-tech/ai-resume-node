@@ -658,6 +658,7 @@ function registerOptimizeRoutes(
       SELECT * FROM (
         SELECT
           r.user_id AS userId,
+          MAX(cu.avatar) AS avatar,
           MAX(cu.nickname) AS userNickname,
           MAX(cu.account) AS userAccount,
           MAX(cu.phone) AS userPhone,
@@ -687,6 +688,7 @@ function registerOptimizeRoutes(
     const row = await sql<Record<string, unknown>>`
       SELECT
         r.user_id AS userId,
+        MAX(cu.avatar) AS avatar,
         MAX(cu.nickname) AS userNickname,
         MAX(cu.account) AS userAccount,
         MAX(cu.phone) AS userPhone,

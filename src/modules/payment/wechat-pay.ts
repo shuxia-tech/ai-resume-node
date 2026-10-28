@@ -4,6 +4,7 @@ import { AppError } from '@/common/errors.js';
 import { fetchWithTimeout } from '@/common/http-client.js';
 
 const UNIFIED_ORDER_URL = 'https://api.mch.weixin.qq.com/pay/unifiedorder';
+const ORDER_QUERY_URL = 'https://api.mch.weixin.qq.com/pay/orderquery';
 
 export type WechatPayConfig = {
   appId: string;
@@ -166,6 +167,75 @@ export async function createUnifiedOrder(input: {
     throw new AppError(502, '微信支付响应验签失败');
   }
   return { codeUrl: parsed.code_url, prepayId: parsed.prepay_id };
+}
+
+export type WechatOrderQuery = {
+  tradeState: string;
+  openid: string | null;
+  transactionId: string | null;
+  totalFee: number;
+  raw: Record<string, string>;
+};
+
+export function readWechatOrderQuery(
+  parsed: Record<string, string>,
+  config: Pick<WechatPayConfig, 'appId' | 'mchId' | 'mchKey'>,
+): WechatOrderQuery {
+  if (parsed.return_code !== 'SUCCESS' || parsed.result_code !== 'SUCCESS') {
+    throw new AppError(
+      500,
+      `同步订单失败：${parsed.err_code_des || parsed.return_msg || '微信支付查询失败'}`,
+    );
+  }
+  if (!verifyWechatSign(parsed, config.mchKey)) {
+    throw new AppError(500, '同步订单失败：微信支付响应验签失败');
+  }
+  if (
+    (parsed.appid && parsed.appid !== config.appId) ||
+    (parsed.mch_id && parsed.mch_id !== config.mchId)
+  ) {
+    throw new AppError(500, '同步订单失败：微信支付商户不匹配');
+  }
+  const totalFee = Number(parsed.total_fee);
+  if (!Number.isSafeInteger(totalFee) || totalFee < 1) {
+    throw new AppError(500, '同步订单失败：微信支付金额无效');
+  }
+  return {
+    tradeState: parsed.trade_state ?? '',
+    openid: parsed.openid || null,
+    transactionId: parsed.transaction_id || null,
+    totalFee,
+    raw: parsed,
+  };
+}
+
+export async function queryWechatOrder(
+  config: WechatPayConfig,
+  outTradeNo: string,
+): Promise<WechatOrderQuery> {
+  const fields: Record<string, string> = {
+    appid: config.appId,
+    mch_id: config.mchId,
+    nonce_str: randomBytes(16).toString('hex'),
+    out_trade_no: outTradeNo,
+  };
+  fields.sign = signWechatParams(fields, config.mchKey);
+  let responseText: string;
+  try {
+    const response = await fetchWithTimeout(
+      ORDER_QUERY_URL,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'text/xml' },
+        body: buildWechatXml(fields),
+      },
+      15_000,
+    );
+    responseText = await response.text();
+  } catch {
+    throw new AppError(500, '同步订单失败：微信支付查询失败');
+  }
+  return readWechatOrderQuery(parseWechatXml(responseText), config);
 }
 
 export async function renderPayQr(codeUrl: string): Promise<Buffer> {

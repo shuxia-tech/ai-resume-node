@@ -45,6 +45,12 @@ export function buildPhotoProviderBody(input: {
 function id() {
   return randomUUID().replaceAll('-', '').slice(0, 20);
 }
+
+function pageNumber(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.floor(parsed);
+}
 function mapTemplate(row: any) {
   return {
     id: row.id,
@@ -167,27 +173,40 @@ export function registerPhotoRoutes(app: FastifyInstance, env: AppEnv, db: Kysel
   });
 
   app.get('/c/photo/generation', { preHandler: authenticate }, async (request) => {
-    const query = request.query as { page?: string; limit?: string; status?: string };
-    const current = Math.max(1, Number(query.page ?? 1));
-    const size = Math.min(100, Math.max(1, Number(query.limit ?? 10)));
+    const query = request.query as {
+      page?: string;
+      limit?: string;
+      current?: string;
+      size?: string;
+      status?: string;
+    };
+    const current = pageNumber(query.current ?? query.page, 1);
+    const size = Math.min(100, pageNumber(query.size ?? query.limit, 20));
+    const status = query.status?.trim();
+    if (status && !['PROCESSING', 'SUCCESS', 'FAILED'].includes(status)) {
+      throw new AppError(400, `AI证件照生成状态不正确，状态值为：${status}`);
+    }
     let builder = db
       .selectFrom('sc_ai_photo_generation_record')
       .selectAll()
       .where('user_id', '=', request.userId!)
       .where('delete_flag', '=', 'NOT_DELETE');
-    if (query.status) builder = builder.where('status', '=', query.status) as typeof builder;
+    let countBuilder = db
+      .selectFrom('sc_ai_photo_generation_record')
+      .select(({ fn }) => fn.countAll<number>().as('count'))
+      .where('user_id', '=', request.userId!)
+      .where('delete_flag', '=', 'NOT_DELETE');
+    if (status) {
+      builder = builder.where('status', '=', status) as typeof builder;
+      countBuilder = countBuilder.where('status', '=', status) as typeof countBuilder;
+    }
     const [records, count] = await Promise.all([
       builder
         .orderBy('create_time', 'desc')
         .limit(size)
         .offset((current - 1) * size)
         .execute(),
-      db
-        .selectFrom('sc_ai_photo_generation_record')
-        .select(({ fn }) => fn.countAll<number>().as('count'))
-        .where('user_id', '=', request.userId!)
-        .where('delete_flag', '=', 'NOT_DELETE')
-        .executeTakeFirst(),
+      countBuilder.executeTakeFirst(),
     ]);
     return ok({
       records: records.map(mapRecord),

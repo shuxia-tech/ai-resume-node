@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { Kysely } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { AppError } from '@/common/errors.js';
-import { ok } from '@/common/http-response.js';
+import { fail, ok } from '@/common/http-response.js';
 import { requireUser } from '@/auth/request-user.js';
 import type { AppEnv } from '@/config/env.js';
 import type { Database, MemberPackageRow } from '@/infrastructure/database.js';
@@ -14,6 +14,7 @@ import {
   createOutTradeNo,
   createUnifiedOrder,
   parseWechatXml,
+  queryWechatOrder,
   paymentNotifyUrl,
   renderPayQr,
   verifyWechatSign,
@@ -535,6 +536,213 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
   app.post('/c/resume/memberPackage/wxPayCallback/photo', async (request, reply) =>
     callback(request, reply, 'photo'),
   );
+
+  // The photo site polls this while the WeChat callback is delayed. A paid
+  // order returns the remaining quota; an unpaid order stays HTTP 200 so the
+  // client can keep polling instead of treating it as a request failure.
+  app.post(
+    '/c/resume/memberPackage/syncOrder/photo',
+    { preHandler: authenticate },
+    async (request) => {
+      const userId = request.userId as string;
+      const packages = await db
+        .selectFrom('sc_member_package')
+        .select('id')
+        .where('ext_json', '=', 'AI证件照')
+        .where('delete_flag', '=', 'NOT_DELETE')
+        .execute();
+      if (packages.length === 0) return fail(500, '未配置AI证件照会员套餐');
+      const order = await db
+        .selectFrom('t_payment_order')
+        .selectAll()
+        .where('user_id', '=', userId)
+        .where(
+          'product_id',
+          'in',
+          packages.map((item) => item.id),
+        )
+        .where('delete_flag', '=', 'NOT_DELETE')
+        .orderBy('create_time', 'desc')
+        .limit(1)
+        .executeTakeFirst();
+      if (!order) return fail(500, '未找到AI证件照支付订单');
+      if (order.status === '支付成功') {
+        return ok({ remainingCount: await photoRemainingCount(db, userId) }, '订单已支付成功');
+      }
+      if (env.PAYMENT_MODE !== 'live') return ok(null, '订单尚未支付成功');
+
+      let queried: Awaited<ReturnType<typeof queryWechatOrder>>;
+      try {
+        queried = await queryWechatOrder(livePayConfig(), order.order_no);
+      } catch (error) {
+        const message =
+          error instanceof AppError ? error.message : '同步订单失败：微信支付查询失败';
+        return fail(500, message.startsWith('同步订单失败') ? message : `同步订单失败：${message}`);
+      }
+      if (queried.tradeState !== 'SUCCESS') return ok(null, '订单尚未支付成功');
+      if (Number(order.amount) !== queried.totalFee) return fail(500, '同步订单失败：金额不一致');
+
+      const settled = await db.transaction().execute(async (trx) => {
+        const locked = await trx
+          .selectFrom('t_payment_order')
+          .selectAll()
+          .where('id', '=', order.id)
+          .where('delete_flag', '=', 'NOT_DELETE')
+          .forUpdate()
+          .executeTakeFirst();
+        if (!locked?.user_id || !locked.product_id) return 'missing' as const;
+        if (locked.status === '支付成功') return 'already' as const;
+        if (!canApplyMockPaymentSuccess(locked.status)) return 'closed' as const;
+        if (Number(locked.amount) !== queried.totalFee) return 'amount' as const;
+        const memberPackage = await findPackage(trx, locked.product_id, 'photo');
+        const user = await trx
+          .selectFrom('client_user')
+          .select([
+            'member_level',
+            'member_expiration_time',
+            'offer_member_expiration_time',
+            'photo_member_expiration_time',
+          ] as any)
+          .where('ID', '=', locked.user_id)
+          .where('DELETE_FLAG', '=', 'NOT_DELETE')
+          .forUpdate()
+          .executeTakeFirst();
+        if (!user) return 'user' as const;
+        const rechargeId = randomUUID().replaceAll('-', '');
+        await trx
+          .insertInto('t_recharge_record')
+          .values({
+            id: rechargeId,
+            delete_flag: 'NOT_DELETE',
+            create_time: new Date(),
+            update_time: new Date(),
+            membership_package_id: memberPackage.id,
+            amount: locked.amount,
+            payment_order_id: locked.id,
+            user_id: locked.user_id,
+            package_name: memberPackage.package_name,
+            gift_day: memberPackage.gift_day,
+            before_member_level: (user as any).member_level ?? null,
+            before_member_expiration_time: (user as any).member_expiration_time ?? null,
+            ext_json: JSON.stringify({
+              membershipPackage: {
+                id: memberPackage.id,
+                packageName: memberPackage.package_name,
+                billingMode: memberPackage.billing_mode,
+                usageCount: memberPackage.usage_count,
+                giftDay: memberPackage.gift_day,
+              },
+              clientMemberInfo: {
+                memberLevel: (user as any).member_level ?? null,
+                memberExpirationTime: (user as any).member_expiration_time ?? null,
+              },
+            }),
+          } as any)
+          .execute();
+        await grantPackage(trx, locked.user_id, memberPackage, 'photo', user);
+        await trx
+          .updateTable('t_payment_order')
+          .set({
+            status: '支付成功',
+            update_time: new Date(),
+            openid: queried.openid ?? locked.openid,
+            recharge_record_id: rechargeId,
+            ext_json: JSON.stringify({
+              mode: 'live',
+              tradeState: queried.tradeState,
+              transactionId: queried.transactionId,
+              totalFee: queried.totalFee,
+            }),
+          })
+          .where('id', '=', locked.id)
+          .execute();
+        return 'granted' as const;
+      });
+      if (settled === 'amount') return fail(500, '同步订单失败：金额不一致');
+      if (settled === 'user' || settled === 'missing')
+        return fail(500, '同步订单失败：订单数据不完整');
+      if (settled === 'closed') return ok(null, '订单尚未支付成功');
+      if (settled === 'granted') {
+        notifyPaymentWebSocket(userId, 'WxPay', {
+          code: 200,
+          success: true,
+          data: '支付成功',
+          msg: '操作成功',
+        });
+        return ok(
+          { remainingCount: await photoRemainingCount(db, userId) },
+          '支付成功，次数已到账',
+        );
+      }
+      return ok({ remainingCount: await photoRemainingCount(db, userId) }, '订单已支付成功');
+    },
+  );
+
+  // Paid and refunded AI-photo orders for the signed-in user. Amount is stored
+  // in fen, matching the WeChat total_fee check, and returned in yuan.
+  app.get('/c/photo/payment', { preHandler: authenticate }, async (request) => {
+    const userId = request.userId as string;
+    const rows = await db
+      .selectFrom('t_payment_order as o')
+      .innerJoin('sc_member_package as p', 'p.id', 'o.product_id')
+      .select([
+        'o.id',
+        'o.order_no',
+        'o.amount',
+        'o.status',
+        'o.pay_channel',
+        'o.create_time',
+        'o.update_time',
+        'p.package_name',
+        'p.usage_count',
+      ])
+      .where('o.user_id', '=', userId)
+      .where('o.delete_flag', '=', 'NOT_DELETE')
+      .where('o.status', 'in', ['支付成功', '已退款'])
+      .where('p.ext_json', '=', 'AI证件照')
+      .orderBy('o.update_time', 'desc')
+      .orderBy('o.create_time', 'desc')
+      .execute();
+    return ok(rows.map(toPhotoPaymentRecord));
+  });
+}
+
+type PhotoPaymentRow = {
+  id: string;
+  order_no: string;
+  amount: number | string | null;
+  status: string | null;
+  pay_channel: string | null;
+  create_time: Date | null;
+  update_time: Date | null;
+  package_name: string | null;
+  usage_count: number | null;
+};
+
+export function toPhotoPaymentRecord(row: PhotoPaymentRow) {
+  const refunded = row.status === '已退款';
+  const paidAt = refunded ? row.create_time ?? row.update_time : row.update_time ?? row.create_time;
+  return {
+    id: row.id,
+    orderNo: row.order_no,
+    packageName: row.package_name || '次数包',
+    usageCount: Number(row.usage_count ?? 0),
+    amount: Number.isFinite(Number(row.amount)) ? Math.round(Number(row.amount)) / 100 : 0,
+    status: refunded ? 'REFUNDED' : 'PAID',
+    paymentMethod: row.pay_channel === '微信' || !row.pay_channel ? '微信支付' : row.pay_channel,
+    paidAt: paidAt ?? new Date(0),
+    ...(refunded && row.update_time ? { refundedAt: row.update_time } : {}),
+  };
+}
+
+async function photoRemainingCount(db: Kysely<Database>, userId: string) {
+  const row = await db
+    .selectFrom('sc_user_function_limits')
+    .select('remaining_uses')
+    .where('user_id', '=', userId)
+    .where('function_name', '=', 'AI证件照生成')
+    .executeTakeFirst();
+  return Number(row?.remaining_uses ?? 0);
 }
 
 async function grantPackage(
