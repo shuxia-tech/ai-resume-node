@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   chargeFen,
   parseWechatXml,
+  paymentNotifyUrl,
   readWechatOrderQuery,
   signWechatParams,
   verifyWechatSign,
@@ -43,6 +44,12 @@ describe('wechat pay', () => {
     );
     expect(fields).toMatchObject({ return_code: 'SUCCESS', total_fee: '1592' });
     expect(wechatNotifyXml(false, '签名校验失败')).toContain('FAIL');
+  });
+
+  it('appends the jisu callback path the same way as offer and photo', () => {
+    const base = 'https://api.gfjianli.com/api/c/resume/memberPackage/wxPayCallback';
+    expect(paymentNotifyUrl(base, 'jisu')).toBe(`${base}/jisu`);
+    expect(paymentNotifyUrl(`${base}/`, 'offer')).toBe(`${base}/offer`);
   });
 
   it('applies the same fen amount and new-user discount as the Java order', () => {

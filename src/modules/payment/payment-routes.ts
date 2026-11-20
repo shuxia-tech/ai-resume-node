@@ -48,7 +48,10 @@ export function canApplyMockPaymentSuccess(status: string | null | undefined) {
 }
 
 function packageCategory(webName?: string) {
-  return webName === 'offer' ? 'offer星球' : webName === 'photo' ? 'AI证件照' : '高分简历';
+  if (webName === 'offer') return 'offer星球';
+  if (webName === 'photo') return 'AI证件照';
+  if (webName === 'jisu') return '极速海投';
+  return '高分简历';
 }
 
 function parseCallback(body: unknown): PaymentBody {
@@ -312,6 +315,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     ['/c/resume/memberPackage/createOrder/:code/:packageId', undefined],
     ['/c/resume/memberPackage/createOrder/offer/:code/:packageId', 'offer'],
     ['/c/resume/memberPackage/createOrder/photo/:code/:packageId', 'photo'],
+    ['/c/resume/memberPackage/createOrder/jisu/:code/:packageId', 'jisu'],
   ] as const)
     app.post(path, async (request, reply) => createOrder(request, webName, reply, true));
 
@@ -319,6 +323,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     ['/c/resume/memberPackage/createJSAPIOrder', undefined],
     ['/c/resume/memberPackage/createJSAPIOrder/offer', 'offer'],
     ['/c/resume/memberPackage/createJSAPIOrder/photo', 'photo'],
+    ['/c/resume/memberPackage/createJSAPIOrder/jisu', 'jisu'],
   ] as const)
     app.post(path, async (request, reply) => createOrder(request, webName, reply, false));
 
@@ -373,6 +378,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     ['/c/resume/memberPackage/createFreeOrder/:code/:packageId', undefined],
     ['/c/resume/memberPackage/createFreeOrder/offer/:code/:packageId', 'offer'],
     ['/c/resume/memberPackage/createFreeOrder/photo/:code/:packageId', 'photo'],
+    ['/c/resume/memberPackage/createFreeOrder/jisu/:code/:packageId', 'jisu'],
   ] as const)
     app.post(path, async (request) => createFreeOrder(request, webName));
 
@@ -381,6 +387,11 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
   );
   app.post(
     '/c/resume/memberPackage/createLinkFreeOrder/offer',
+    { preHandler: authenticate },
+    async () => ok(null),
+  );
+  app.post(
+    '/c/resume/memberPackage/createLinkFreeOrder/jisu',
     { preHandler: authenticate },
     async () => ok(null),
   );
@@ -535,6 +546,9 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
   );
   app.post('/c/resume/memberPackage/wxPayCallback/photo', async (request, reply) =>
     callback(request, reply, 'photo'),
+  );
+  app.post('/c/resume/memberPackage/wxPayCallback/jisu', async (request, reply) =>
+    callback(request, reply, 'jisu'),
   );
 
   // The photo site polls this while the WeChat callback is delayed. A paid
@@ -786,7 +800,7 @@ async function grantPackage(
   }
   const days = Number(memberPackage.gift_day ?? 0);
   const field =
-    webName === 'offer'
+    webName === 'offer' || webName === 'jisu'
       ? 'offer_member_expiration_time'
       : webName === 'photo'
         ? 'photo_member_expiration_time'

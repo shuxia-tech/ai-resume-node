@@ -69,6 +69,7 @@ export function paymentNotifyUrl(base: string, webName: string | undefined): str
   const trimmed = base.replace(/\/$/, '');
   if (webName === 'offer') return `${trimmed}/offer`;
   if (webName === 'photo') return `${trimmed}/photo`;
+  if (webName === 'jisu') return `${trimmed}/jisu`;
   return trimmed;
 }
 

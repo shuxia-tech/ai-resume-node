@@ -406,7 +406,9 @@ export function registerResumeRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
           ? 'AI证件照'
           : request.query.webName === 'offer'
             ? 'offer星球'
-            : '高分简历';
+            : request.query.webName === 'jisu'
+              ? '极速海投'
+              : '高分简历';
       return listMemberPackages(db, category, {
         code: request.query.code,
         userId: request.userId,
@@ -419,6 +421,13 @@ export function registerResumeRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
     { preHandler: authenticate },
     async (request) =>
       listMemberPackages(db, 'offer星球', { code: request.query.code, userId: request.userId }),
+  );
+
+  app.get<{ Querystring: { code?: string } }>(
+    '/c/resume/memberPackage/jisu',
+    { preHandler: authenticate },
+    async (request) =>
+      listMemberPackages(db, '极速海投', { code: request.query.code, userId: request.userId }),
   );
 
   app.get<{ Querystring: { code?: string } }>(
