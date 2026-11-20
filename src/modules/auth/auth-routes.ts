@@ -52,6 +52,12 @@ function redirectUriFor(env: AppEnv, webName?: string) {
   if (webName === 'offer') return env.WECHAT_REDIRECT_URI_OFFER ?? env.WECHAT_REDIRECT_URI;
   if (webName === 'photo') return env.WECHAT_REDIRECT_URI_PHOTO ?? env.WECHAT_REDIRECT_URI;
   if (webName === 'campus') return env.WECHAT_REDIRECT_URI_CAMPUS ?? env.WECHAT_REDIRECT_URI;
+  if (webName === 'jisu') {
+    if (!env.WECHAT_REDIRECT_URI_JISU || !env.FRONT_REDIRECT_URI_JISU) {
+      throw new AppError(503, '缺少极速海投微信开放平台或前台回调配置');
+    }
+    return env.WECHAT_REDIRECT_URI_JISU;
+  }
   return env.WECHAT_REDIRECT_URI;
 }
 
@@ -59,6 +65,7 @@ function frontRedirectFor(env: AppEnv, webName?: string) {
   if (webName === 'offer') return env.FRONT_REDIRECT_URI_OFFER;
   if (webName === 'photo') return env.FRONT_REDIRECT_URI_PHOTO;
   if (webName === 'campus') return env.FRONT_REDIRECT_URI_CAMPUS;
+  if (webName === 'jisu') return env.FRONT_REDIRECT_URI_JISU;
   return env.FRONT_REDIRECT_URI;
 }
 
@@ -271,6 +278,9 @@ export function registerAuthRoutes(app: FastifyInstance, env: AppEnv, db: Kysely
   app.get('/oauth/resume/wx/getCode/campus', async () =>
     ok(authorizeUrl(env, 'campus', 'snsapi_userinfo')),
   );
+  app.get('/oauth/resume/wx/getCode/jisu', async () =>
+    ok(authorizeUrl(env, 'jisu', 'snsapi_userinfo')),
+  );
   async function completeWechatCallback(request: any, reply: any, webName?: string) {
     const { code } = request.query as { code?: string };
     if (!code) throw new AppError(400, '微信授权 code 不能为空');
@@ -279,6 +289,9 @@ export function registerAuthRoutes(app: FastifyInstance, env: AppEnv, db: Kysely
     const token = randomBytes(32).toString('hex');
     await saveClientToken(env, token, userId);
     const redirect = frontRedirectFor(env, webName);
+    if (webName === 'jisu' && !redirect) {
+      throw new AppError(503, '缺少极速海投前台登录回调配置');
+    }
     if (!redirect) return ok({ token, userId });
     const separator = redirect.includes('?') ? (redirect.endsWith('=') ? '' : '&') : '?';
     return reply.redirect(
@@ -291,6 +304,9 @@ export function registerAuthRoutes(app: FastifyInstance, env: AppEnv, db: Kysely
   );
   app.get('/oauth/resume/wx/getOpenId/campus', (request, reply) =>
     completeWechatCallback(request, reply, 'campus'),
+  );
+  app.get('/oauth/resume/wx/getOpenId/jisu', (request, reply) =>
+    completeWechatCallback(request, reply, 'jisu'),
   );
   app.get('/oauth/resume/callback/wechat', (request, reply) =>
     completeWechatCallback(

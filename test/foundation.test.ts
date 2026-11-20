@@ -343,6 +343,36 @@ describe('foundation', () => {
     expect(routes).toContain('click (POST)');
   });
 
+  it('builds the jisu wechat authorize url and rejects a missing callback', async () => {
+    const app = buildApp(
+      loadEnv({
+        ...baseEnv,
+        WECHAT_APP_ID: 'wx-jisu',
+        WECHAT_REDIRECT_URI_JISU:
+          'https://api.gfjianli.com/api/oauth/resume/callback/wechat?webName=jisu',
+        FRONT_REDIRECT_URI_JISU: 'https://jisuhaitou.gfjianli.com/?token=',
+      }),
+    );
+    const response = await app.inject({ method: 'GET', url: '/oauth/resume/wx/getCode/jisu' });
+    expect(response.statusCode).toBe(200);
+    const url = String(response.json().data);
+    expect(url).toContain('appid=wx-jisu');
+    expect(url).toContain(encodeURIComponent('webName=jisu'));
+    expect(url).toContain('snsapi_userinfo');
+    await app.close();
+
+    const missing = buildApp(loadEnv({ ...baseEnv, WECHAT_APP_ID: 'wx-jisu' }));
+    const denied = await missing.inject({
+      method: 'GET',
+      url: '/oauth/resume/render/wechat?webName=jisu',
+    });
+    expect(denied.json()).toMatchObject({
+      success: false,
+      msg: '缺少极速海投微信开放平台或前台回调配置',
+    });
+    await missing.close();
+  });
+
   it('registers every path in the retained frontend contract', () => {
     const app = buildApp(loadEnv(baseEnv));
     const routes: Array<[string, string]> = [
@@ -442,8 +472,10 @@ describe('foundation', () => {
       ['POST', '/biz/dict/delete'],
       ['GET', '/oauth/resume/wx/getCode'],
       ['GET', '/oauth/resume/wx/getCode/offer'],
+      ['GET', '/oauth/resume/wx/getCode/jisu'],
       ['GET', '/oauth/resume/wx/getOpenId'],
       ['GET', '/oauth/resume/wx/getOpenId/offer'],
+      ['GET', '/oauth/resume/wx/getOpenId/jisu'],
       ['POST', '/oauth/resume/render/wechat'],
       ['POST', '/aiChat/c/gpt/chatSseContext'],
       ['POST', '/aiChat/c/gpt/chatStreamContext'],

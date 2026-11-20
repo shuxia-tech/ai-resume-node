@@ -549,8 +549,6 @@ export async function operateProfile(db: CampusDb, operatorId: string, body: Rec
     throw campus(121010, '未审核通过的名片不能展示或置顶');
   }
   if (action === GRANT_VIP) {
-    const latest = await latestVerification(db, cellText(profile, 'user_id') ?? '');
-    if (!latest || cellText(latest, 'status') !== APPROVED) throw campus(121002, '只有已认证用户可以开通VIP');
     const expire = asDate(body.vipExpireTime);
     if (expire && expire.getTime() <= Date.now()) throw campus(121010, 'VIP有效期必须晚于当前时间');
   }
