@@ -2,6 +2,15 @@ import { Kysely, MysqlDialect, type Selectable } from 'kysely';
 import mysql from 'mysql2';
 import type { AppEnv } from '@/config/env.js';
 
+export type JisuResumeRow = {
+  id: string;
+  user_id: string;
+  content: string;
+  delete_flag: string;
+  create_time: Date | null;
+  update_time: Date | null;
+};
+
 export type ResumeRow = {
   id: string;
   title: string;
@@ -393,6 +402,7 @@ export type AiPhotoGenerationRow = {
 };
 
 export type Database = {
+  t_jisu_resume: JisuResumeRow;
   sc_resume: ResumeRow;
   sc_resume_modules: ResumeModuleRow;
   sc_user_actions: UserActionRow;

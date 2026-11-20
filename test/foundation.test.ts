@@ -376,6 +376,10 @@ describe('foundation', () => {
   it('registers every path in the retained frontend contract', () => {
     const app = buildApp(loadEnv(baseEnv));
     const routes: Array<[string, string]> = [
+      ['GET', '/c/jisu/resume'],
+      ['POST', '/c/jisu/resume'],
+      ['GET', '/api/c/jisu/resume'],
+      ['POST', '/api/c/jisu/resume'],
       ['GET', '/c/resume/:resumeId'],
       ['GET', '/c/resume/:resumeId/baseInfo'],
       ['GET', '/c/resume/category'],
