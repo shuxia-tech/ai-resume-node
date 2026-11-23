@@ -134,6 +134,31 @@ export async function uploadToCos(
   return publicUrl(env, config, key);
 }
 
+export async function cosPublicUrl(env: AppEnv, key: string): Promise<string> {
+  const config = await requireCosConfig(env);
+  return publicUrl(env, config, key);
+}
+
+export async function uploadToCosKey(
+  env: AppEnv,
+  body: Buffer,
+  contentType: string | undefined,
+  key: string,
+): Promise<string> {
+  if (!key.startsWith('xingce/') || key.includes('..') || key.includes('\\')) {
+    throw new AppError(400, '文件路径无效');
+  }
+  const { config, cos } = await createClient(env);
+  await cos.putObject({
+    Bucket: config.bucket,
+    Region: config.region,
+    Key: key,
+    Body: body,
+    ...(contentType ? { ContentType: contentType } : {}),
+  });
+  return publicUrl(env, config, key);
+}
+
 export async function deleteFromCos(env: AppEnv, urlOrKey: string): Promise<void> {
   const { config, cos } = await createClient(env);
   await cos.deleteObject({

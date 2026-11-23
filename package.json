@@ -26,7 +26,8 @@
     "db:inspect:schema": "tsx scripts/inspect-schema.ts",
     "db:inspect:statuses": "tsx scripts/inspect-statuses.ts",
     "db:inspect:scheduled-jobs": "tsx scripts/inspect-scheduled-jobs.ts",
-    "db:create-test-fixture": "tsx scripts/create-test-fixture.ts"
+    "db:create-test-fixture": "tsx scripts/create-test-fixture.ts",
+    "xingce:import-full": "DOTENV_CONFIG_PATH=.env.production tsx scripts/import-xingce-full.ts"
   },
   "dependencies": {
     "@ai-sdk/deepseek": "3.0.49",

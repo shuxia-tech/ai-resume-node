@@ -67,6 +67,7 @@ const envSchema = z
     FRONT_REDIRECT_URI_PHOTO: optionalUrl,
     FRONT_REDIRECT_URI_CAMPUS: optionalUrl,
     FRONT_REDIRECT_URI_JISU: optionalUrl,
+    FRONT_REDIRECT_URI_XINGCE: optionalUrl,
     WECHAT_PAY_APP_ID: z.string().optional(),
     WECHAT_PAY_MCH_ID: z.string().optional(),
     WECHAT_PAY_MCH_KEY: z.string().optional(),

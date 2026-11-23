@@ -10,6 +10,8 @@ import { formatPayloadDates } from '@/common/java-date.js';
 import { createDatabase } from '@/infrastructure/database.js';
 import { registerResumeRoutes } from '@/modules/resume/resume-routes.js';
 import { registerJisuResumeRoutes } from '@/modules/jisu/jisu-resume-routes.js';
+import { registerXingceRoutes } from '@/modules/xingce/xingce-routes.js';
+import { registerXingceUserRoutes } from '@/modules/xingce/xingce-user-routes.js';
 import { registerAiRoutes } from '@/modules/ai/ai-routes.js';
 import { bindCosConfigDatabase } from '@/modules/storage/cos-service.js';
 import { registerStorageRoutes } from '@/modules/storage/storage-routes.js';
@@ -90,6 +92,8 @@ export function buildApp(env: AppEnv = loadEnv()): FastifyInstance {
   bindCosConfigDatabase(database);
   registerResumeRoutes(app, env, database);
   registerJisuResumeRoutes(app, env, database);
+  registerXingceRoutes(app, env, database);
+  registerXingceUserRoutes(app, env, database);
   registerAiRoutes(app, env, database);
   registerStorageRoutes(app, env);
   registerCampusRoutes(app, env, database);

@@ -66,6 +66,7 @@ function frontRedirectFor(env: AppEnv, webName?: string) {
   if (webName === 'photo') return env.FRONT_REDIRECT_URI_PHOTO;
   if (webName === 'campus') return env.FRONT_REDIRECT_URI_CAMPUS;
   if (webName === 'jisu') return env.FRONT_REDIRECT_URI_JISU;
+  if (webName === 'xingce') return env.FRONT_REDIRECT_URI_XINGCE;
   return env.FRONT_REDIRECT_URI;
 }
 
