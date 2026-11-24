@@ -9,6 +9,8 @@ import type { AppEnv } from '@/config/env.js';
 import type { Database } from '@/infrastructure/database.js';
 import { collectionSlice, loadCollection } from '@/modules/xingce/xingce-collection.js';
 import { ensureXingceTables } from '@/modules/xingce/xingce-routes.js';
+import { getAdminQuestion, updateLockedQuestion } from '@/modules/xingce/xingce-admin-questions.js';
+import { hasCollectionScans, loadCollectionScans } from '@/modules/xingce/xingce-scans.js';
 import {
   extendExpiry,
   questionVersion,
@@ -132,7 +134,7 @@ async function awardDays(
   now: Date,
 ) {
   const existing = await sql<{ expires_at: Date }>`
-    SELECT expires_at FROM t_xingce_member WHERE user_id = ${userId}
+    SELECT expires_at FROM t_xingce_member WHERE user_id = ${userId} FOR UPDATE
   `.execute(db);
   const current = existing.rows[0]?.expires_at ? new Date(existing.rows[0].expires_at) : null;
   const next = extendExpiry(current, now, days);
@@ -318,22 +320,31 @@ export function registerXingceUserRoutes(
       await ensureUserTables(db);
       const id = request.params.id.slice(0, 80);
       const page = Math.max(0, Number(request.query.page) || 0);
-      const data = await loadCollection(db, {
-        batchId: id,
-        kind: request.query.kind?.slice(0, 20) || 'all',
-        page,
-        year: request.query.year?.slice(0, 10) || '',
-        region: request.query.region?.slice(0, 40) || '',
-        paper: request.query.paper?.slice(0, 80) || '',
-        module: request.query.module?.slice(0, 40) || '',
-        book: request.query.book?.slice(0, 80) || '',
-      });
+      const [data, hasScans] = await Promise.all([
+        loadCollection(db, {
+          batchId: id,
+          kind: request.query.kind?.slice(0, 20) || 'all',
+          page,
+          year: request.query.year?.slice(0, 10) || '',
+          region: request.query.region?.slice(0, 40) || '',
+          paper: request.query.paper?.slice(0, 80) || '',
+          module: request.query.module?.slice(0, 40) || '',
+          book: request.query.book?.slice(0, 80) || '',
+        }),
+        hasCollectionScans(db, id),
+      ]);
       return ok({
         ...data,
+        hasScans,
         ids: data.ids.length > 4000 ? [] : data.ids,
       });
     },
   );
+
+  app.get<{ Params: { id: string } }>('/c/xingce/collections/:id/scans', async (request) => {
+    await ensureXingceTables(db);
+    return ok(await loadCollectionScans(db, request.params.id.slice(0, 80)));
+  });
 
   app.get<{ Querystring: Record<string, string | undefined> }>(
     '/c/xingce/practice',
@@ -407,8 +418,14 @@ export function registerXingceUserRoutes(
     },
   );
 
-  app.get('/c/xingce/daily', async () => {
+  app.get('/c/xingce/daily', async (request) => {
     await ensureUserTables(db);
+    if ((request.query as { count?: string }).count === '1') {
+      const total = await sql<{ total: number }>`
+        SELECT COUNT(*) AS total FROM t_xingce_daily_question WHERE delete_flag = 'NOT_DELETE'
+      `.execute(db);
+      return ok({ total: Number(total.rows[0]?.total ?? 0), questions: [] });
+    }
     const rows = await sql<{ id: string; topic: string; question: string; published_date: string }>`
       SELECT id, topic, question, published_date FROM t_xingce_daily_question
       WHERE delete_flag = 'NOT_DELETE' ORDER BY published_date DESC, id ASC LIMIT 500
@@ -437,7 +454,7 @@ export function registerXingceUserRoutes(
     await ensureUserTables(db);
     const rows = await sql<{ payload_json: string }>`
       SELECT payload_json FROM t_xingce_interview
-      WHERE id = ${request.params.id} AND delete_flag = 'NOT_DELETE'
+      WHERE id = ${request.params.id} AND delete_flag = 'NOT_DELETE' AND status = 'published'
     `.execute(db);
     if (!rows.rows[0]) throw new AppError(404, '没有这篇面经');
     return ok(JSON.parse(rows.rows[0].payload_json));
@@ -705,35 +722,35 @@ export function registerXingceUserRoutes(
     });
   });
 
-  app.get<{ Querystring: { status?: string } }>(
+  app.get<{ Querystring: { status?: string; offset?: string } }>(
     '/c/xingce/admin/corrections',
     { preHandler: adminGuard },
     async (request) => {
       await ensureUserTables(db);
-      const status = request.query.status ?? 'pending';
-      const rows = await sql<{
-        id: string;
-        question_id: string;
-        correction_type: string;
-        message: string;
-        suggestion: string;
-        status: string;
-        created_at: Date;
-      }>`
-        SELECT id, question_id, correction_type, message, suggestion, status, created_at
-        FROM t_xingce_correction
-        WHERE ${status} = 'all' OR status = ${status}
-        ORDER BY created_at DESC LIMIT 50
-      `.execute(db);
+      const requested = request.query.status ?? 'pending';
+      const status = ['pending', 'approved', 'rejected', 'all'].includes(requested) ? requested : 'pending';
+      const offset = Math.max(0, Math.min(100_000, Math.trunc(Number(request.query.offset) || 0)));
+      const pageSize = 20;
+      const [rows, counts] = await Promise.all([
+        sql<{
+          id: string; question_id: string; correction_type: string; message: string; suggestion: string;
+          status: string; created_at: Date; review_note: string; reward_days: number; title: string | null;
+        }>`
+          SELECT r.id, r.question_id, r.correction_type, r.message, r.suggestion, r.status, r.created_at,
+            r.review_note, r.reward_days, LEFT(q.stem, 120) AS title
+          FROM t_xingce_correction AS r LEFT JOIN t_xingce_question AS q ON q.id = r.question_id
+          WHERE ${status} = 'all' OR r.status = ${status}
+          ORDER BY r.created_at DESC, r.id DESC LIMIT ${pageSize} OFFSET ${offset}
+        `.execute(db),
+        sql<{ status: string; total: number }>`SELECT status, COUNT(*) AS total FROM t_xingce_correction GROUP BY status`.execute(db),
+      ]);
       return ok({
+        counts: Object.fromEntries(counts.rows.map((row) => [row.status, Number(row.total)])),
+        pageSize,
         reports: rows.rows.map((row) => ({
-          id: row.id,
-          questionId: row.question_id,
-          type: row.correction_type,
-          message: row.message,
-          suggestion: row.suggestion,
-          status: row.status,
-          createdAt: new Date(row.created_at).toISOString(),
+          id: row.id, questionId: row.question_id, type: row.correction_type, message: row.message,
+          suggestion: row.suggestion, status: row.status, createdAt: new Date(row.created_at).toISOString(),
+          reviewNote: row.review_note, rewardDays: row.reward_days, title: row.title || row.question_id,
         })),
       });
     },
@@ -741,64 +758,57 @@ export function registerXingceUserRoutes(
 
   app.post<{
     Params: { id: string };
-    Body: { action?: string; note?: string; stem?: string; answer?: string; analysis?: string; status?: string };
+    Body: { action?: string; note?: string; version?: string; patch?: unknown; stem?: string; answer?: string; analysis?: string; status?: string };
   }>('/c/xingce/admin/corrections/:id', { preHandler: adminGuard }, async (request) => {
     await ensureUserTables(db);
-    const action = request.body?.action;
-    if (!['approve', 'reject', 'edit'].includes(String(action))) throw new AppError(400, '审核动作无效');
-    const note = String(request.body?.note ?? '').slice(0, 1000);
-    const report = await sql<{
-      id: string;
-      user_id: string | null;
-      question_id: string;
-      question_version: string;
-      status: string;
-    }>`
-      SELECT id, user_id, question_id, question_version, status FROM t_xingce_correction WHERE id = ${request.params.id}
-    `.execute(db);
-    const row = report.rows[0];
-    if (!row) throw new AppError(404, '反馈不存在');
-    if (row.status !== 'pending') throw new AppError(409, '这条反馈已经处理过');
-    const now = new Date();
-    if (action === 'reject') {
+    const body = request.body ?? {};
+    const action = body.action;
+    if (action !== 'approve' && action !== 'reject' && action !== 'edit') throw new AppError(400, '审核动作无效');
+    const note = String(body.note ?? '').trim().slice(0, 1000);
+    if (action === 'reject' && note.length < 2) throw new AppError(400, '请填写不采纳的原因');
+
+    const result = await db.transaction().execute(async (trx) => {
+      const report = await sql<{
+        id: string; user_id: string | null; question_id: string; question_version: string; status: string;
+      }>`
+        SELECT id, user_id, question_id, question_version, status FROM t_xingce_correction
+        WHERE id = ${request.params.id} FOR UPDATE
+      `.execute(trx);
+      const row = report.rows[0];
+      if (!row) throw new AppError(404, '反馈不存在');
+      if (row.status !== 'pending') throw new AppError(409, '这条反馈已经处理过');
+      const now = new Date();
+      const status = action === 'reject' ? 'rejected' : 'approved';
+
+      if (action === 'edit') {
+        const question = await getAdminQuestion(trx, row.question_id);
+        const patch = body.patch ?? { stem: body.stem, answer: body.answer, analysis: body.analysis };
+        await updateLockedQuestion(trx, row.question_id, {
+          action: body.status === 'withdrawn' ? 'withdraw' : 'save',
+          version: body.version ?? question.version,
+          patch,
+        });
+      }
+
+      let rewarded = false;
+      if (status === 'approved' && row.user_id) {
+        const key = `correction:${row.user_id}:${row.question_id}:${row.question_version}`;
+        const existing = await sql<{ id: string }>`
+          SELECT id FROM t_xingce_reward_ledger WHERE source_key = ${key} FOR UPDATE
+        `.execute(trx);
+        if (!existing.rows[0]) {
+          await awardDays(trx, row.user_id, 'correction', key, 3, now);
+          rewarded = true;
+        }
+      }
       await sql`
         UPDATE t_xingce_correction
-        SET status = 'rejected', review_note = ${note}, reviewed_at = ${now}, reviewer = ${request.adminId ?? ''}
+        SET status = ${status}, review_note = ${note}, reward_days = ${rewarded ? 3 : 0},
+            reviewed_at = ${now}, reviewer = ${request.adminId ?? ''}
         WHERE id = ${row.id}
-      `.execute(db);
-      return ok({ status: 'rejected' });
-    }
-    if (action === 'edit') {
-      const stem = String(request.body?.stem ?? '').trim();
-      const answer = String(request.body?.answer ?? '').trim().toUpperCase();
-      const analysis = String(request.body?.analysis ?? '');
-      const status = request.body?.status === 'withdrawn' ? 'withdrawn' : 'published';
-      if (!stem) throw new AppError(400, '题干不能为空');
-      if (!/^[A-H]$/.test(answer)) throw new AppError(400, '答案无效');
-      await sql`
-        UPDATE t_xingce_question
-        SET stem = ${stem}, answer = ${answer}, analysis = ${analysis}, status = ${status},
-            edited = 1, update_time = ${now}
-        WHERE id = ${row.question_id}
-      `.execute(db);
-    }
-    let rewarded = false;
-    if (row.user_id) {
-      const key = `correction:${row.user_id}:${row.question_id}:${row.question_version}`;
-      const already = await sql<{ id: string }>`
-        SELECT id FROM t_xingce_reward_ledger WHERE source_key = ${key}
-      `.execute(db);
-      if (!already.rows[0]) {
-        await awardDays(db, row.user_id, 'correction', key, 3, now);
-        rewarded = true;
-      }
-    }
-    await sql`
-      UPDATE t_xingce_correction
-      SET status = 'approved', review_note = ${note}, reward_days = ${rewarded ? 3 : 0},
-          reviewed_at = ${now}, reviewer = ${request.adminId ?? ''}
-      WHERE id = ${row.id}
-    `.execute(db);
-    return ok({ status: 'approved', rewarded });
+      `.execute(trx);
+      return { status, rewarded };
+    });
+    return ok(result);
   });
 }

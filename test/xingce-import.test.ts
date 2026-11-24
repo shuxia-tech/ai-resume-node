@@ -41,6 +41,15 @@ describe('xingce import', () => {
     ).toBe('产品');
   });
 
+  it('后台导入把缺少答案的记录留在待校对队列', () => {
+    const plan = planImport({
+      questions: [{ id: 'unconfirmed', stem: '缺少答案', category: '常识判断', options: { A: '甲', B: '乙' } }],
+      drafts: [{ id: 'blank', source: '扫描图片' }],
+    }, { validatePublication: true });
+    expect(plan.questions.map((row) => row.status)).toEqual(['draft', 'draft']);
+    expect(JSON.parse(plan.questions[0]?.payloadJson ?? '{}').status).toBe('draft');
+  });
+
   it('rejects a file larger than the sample limit', () => {
     const questions = Array.from({ length: MAX_IMPORT_RECORDS + 1 }, (_, index) => ({
       id: `q-${index}`,

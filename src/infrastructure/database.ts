@@ -1,3 +1,4 @@
+import type { Socket } from 'node:net';
 import { Kysely, MysqlDialect, type Selectable } from 'kysely';
 import mysql from 'mysql2';
 import type { AppEnv } from '@/config/env.js';
@@ -450,7 +451,7 @@ export function createDatabase(env: AppEnv): Kysely<Database> {
   });
 
   pool.on('connection', (connection) => {
-    const stream = connection.stream as { setTimeout?: (ms: number) => void; on?: Function } | undefined;
+    const stream = (connection as typeof connection & { stream?: Socket }).stream;
     if (!stream?.setTimeout || !stream.on) return;
     stream.setTimeout(querySocketTimeoutMs);
     stream.on('timeout', () => {

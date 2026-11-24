@@ -4,6 +4,7 @@ export const MAX_IMPORT_RECORDS = 30;
 
 export type ImportOptions = {
   maxRecords?: number;
+  validatePublication?: boolean;
 };
 
 const idPattern = /^[\w.-]{1,160}$/;
@@ -71,7 +72,7 @@ function addImage(images: string[], value: unknown) {
   if (image) images.push(image);
 }
 
-function imagesOf(raw: Record<string, unknown>) {
+export function imagesOf(raw: Record<string, unknown>) {
   const images: string[] = [];
   addImage(images, raw.stemImage);
   addImage(images, raw.sourceImage);
@@ -103,23 +104,37 @@ function toQuestion(
   raw: Record<string, unknown>,
   batchId: string,
   fallbackStatus: string,
+  batchTitle: string,
+  validatePublication: boolean,
 ): QuestionDraft {
   const stem = text(raw.stem || raw.text || raw.title || raw.prompt || raw.transcript, 200_000);
-  if (!stem) throw new AppError(400, '题目缺少题干');
   const options = raw.options && typeof raw.options === 'object' ? raw.options : {};
+  const questionBatch = text(raw.batchId, 80) || batchId;
+  const category = text(raw.category, 40);
+  const answer = text(raw.answer, 8).toUpperCase();
+  let status = questionStatus(raw, fallbackStatus);
+  if (validatePublication && status === 'published') {
+    const optionImages = raw.optionImages && typeof raw.optionImages === 'object' ? raw.optionImages : {};
+    const validKeys = Object.keys({ ...options, ...optionImages }).filter((key) =>
+      /^[A-H]$/.test(key) && ((options as Record<string, unknown>)[key] || (optionImages as Record<string, unknown>)[key] || raw.stemImage),
+    );
+    if (!stem || !category || validKeys.length < 2 || !validKeys.includes(answer) || raw.reviewRequired === true) status = 'draft';
+  }
+  if (!stem && status !== 'draft') throw new AppError(400, '题目缺少题干');
+  const payload = batchTitle && questionBatch === batchId ? { ...raw, batchTitle } : raw;
   return {
     id: identifier(raw.id, '题目'),
-    batchId: text(raw.batchId, 80) || batchId,
-    category: text(raw.category, 40),
+    batchId: questionBatch,
+    category,
     questionType: text(raw.type, 20) || 'single',
     stem,
     optionsJson: JSON.stringify(options),
-    answer: text(raw.answer, 8).toUpperCase(),
+    answer,
     analysis: text(raw.analysis, 200_000),
-    status: questionStatus(raw, fallbackStatus),
+    status,
     source: text(raw.source, 500),
     imageJson: JSON.stringify(imagesOf(raw)),
-    payloadJson: JSON.stringify(raw),
+    payloadJson: JSON.stringify(validatePublication ? { ...payload, status } : payload),
   };
 }
 
@@ -157,6 +172,7 @@ export function planImport(payload: unknown, options: ImportOptions = {}): Impor
   const body = record(payload);
   const batch = record(body.batch ?? {});
   const batchId = text(batch.id || body.batchId, 80) || 'manual';
+  const batchTitle = text(batch.title, 300);
   const collection = text(body.collection, 40);
   const entries = listOf(body.entries).map(record);
   const empty = { batchId, questions: [], interviews: [], daily: [] };
@@ -174,9 +190,9 @@ export function planImport(payload: unknown, options: ImportOptions = {}): Impor
   }
 
   const questions = [
-    ...listOf(body.questions).map((item) => toQuestion(record(item), batchId, 'published')),
-    ...listOf(body.drafts).map((item) => toQuestion(record(item), batchId, 'draft')),
-    ...listOf(body.references).map((item) => toQuestion(record(item), batchId, 'reference')),
+    ...listOf(body.questions).map((item) => toQuestion(record(item), batchId, 'published', batchTitle, options.validatePublication ?? false)),
+    ...listOf(body.drafts).map((item) => toQuestion(record(item), batchId, 'draft', batchTitle, options.validatePublication ?? false)),
+    ...listOf(body.references).map((item) => toQuestion(record(item), batchId, 'reference', batchTitle, options.validatePublication ?? false)),
   ];
   assertCount(questions.length, maxRecords);
   return { ...empty, kind: 'questions', questions };

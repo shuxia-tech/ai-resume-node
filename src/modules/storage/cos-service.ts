@@ -201,3 +201,52 @@ export async function createCosDownloadUrl(
   });
   return result;
 }
+
+const xingceArchivePrefix = 'xingce/admin-sources/';
+
+export async function archiveXingceSource(env: AppEnv, body: Buffer, filename: string, contentType: string) {
+  const name = filename.replace(/[^\p{L}\p{N} ._()（）-]/gu, '_').slice(-160);
+  const reverseTime = String(9_999_999_999_999 - Date.now()).padStart(13, '0');
+  const key = `${xingceArchivePrefix}${reverseTime}-${randomUUID()}/${name}`;
+  const { config, cos } = await createClient(env);
+  await cos.putObject({
+    Bucket: config.bucket, Region: config.region, Key: key, Body: body,
+    ACL: 'private', ContentType: contentType, CacheControl: 'private, no-store',
+    ContentDisposition: `inline; filename*=UTF-8''${encodeURIComponent(name).replace(/[!'()*]/g, '_')}`,
+  });
+  return { key, name };
+}
+
+export async function listXingceSources(env: AppEnv, marker?: string) {
+  const { config, cos } = await createClient(env);
+  const result = await cos.getBucket({
+    Bucket: config.bucket, Region: config.region, Prefix: xingceArchivePrefix, MaxKeys: 30,
+    ...(marker?.startsWith(xingceArchivePrefix) ? { Marker: marker } : {}),
+  });
+  return {
+    files: (result.Contents ?? []).map((file) => ({
+      key: file.Key, name: file.Key.split('/').at(-1) ?? file.Key, size: Number(file.Size), createdAt: file.LastModified,
+    })),
+    next: result.NextMarker ?? (result.IsTruncated === 'true' ? result.Contents.at(-1)?.Key : undefined) ?? '',
+  };
+}
+
+function assertXingceSource(key: string) {
+  if (!key.startsWith(xingceArchivePrefix) || key.includes('\\') || key.split('/').includes('..')) {
+    throw new AppError(400, '原始资料地址无效');
+  }
+}
+
+export async function signXingceSource(env: AppEnv, key: string) {
+  assertXingceSource(key);
+  const { config, cos } = await createClient(env);
+  return cos.getObjectUrl({ Bucket: config.bucket, Region: config.region, Key: key, Sign: true, Expires: 300 });
+}
+
+export async function readXingceSourceImage(env: AppEnv, key: string) {
+  assertXingceSource(key);
+  if (!/\.(png|jpe?g|webp)$/i.test(key)) throw new AppError(400, '只有原始图片可以截取');
+  const { config, cos } = await createClient(env);
+  const result = await cos.getObject({ Bucket: config.bucket, Region: config.region, Key: key });
+  return result.Body;
+}

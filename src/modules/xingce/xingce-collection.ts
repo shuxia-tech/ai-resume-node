@@ -225,7 +225,53 @@ export async function loadCollection(db: Kysely<Database>, query: CollectionQuer
   };
 }
 
+function needsFullCollection(query: CollectionQuery) {
+  return Boolean(
+    (query.kind && query.kind !== 'all' && query.kind !== '全部') ||
+      query.year ||
+      query.region ||
+      query.paper ||
+      query.module ||
+      query.book,
+  );
+}
+
+async function sliceOrderedIds(db: Kysely<Database>, query: CollectionQuery) {
+  const batchId = query.batchId;
+  const counts = await sql<{ published: number; reference_count: number }>`
+    SELECT SUM(status = 'published') AS published, SUM(status = 'reference') AS reference_count
+    FROM t_xingce_question
+    WHERE delete_flag = 'NOT_DELETE' AND batch_id = ${batchId}
+  `.execute(db);
+  const published = Number(counts.rows[0]?.published ?? 0);
+  const referenceOnly = published === 0 && Number(counts.rows[0]?.reference_count ?? 0) > 0;
+  const status = referenceOnly ? 'reference' : 'published';
+  const questionId = query.questionId || '';
+  const position = await sql<{ total: number; before_count: number; found: number }>`
+    SELECT COUNT(*) AS total,
+      SUM(id < ${questionId}) AS before_count,
+      SUM(id = ${questionId}) AS found
+    FROM t_xingce_question
+    WHERE delete_flag = 'NOT_DELETE' AND batch_id = ${batchId} AND status = ${status}
+  `.execute(db);
+  const total = Number(position.rows[0]?.total ?? 0);
+  const limit = query.limit ?? PRACTICE_GROUP_SIZE;
+  let offset = Math.max(0, query.offset ?? 0);
+  if (questionId && Number(position.rows[0]?.found ?? 0) > 0) {
+    offset = Math.floor(Number(position.rows[0]?.before_count ?? 0) / PRACTICE_GROUP_SIZE) * PRACTICE_GROUP_SIZE;
+  }
+  offset = Math.min(offset, Math.max(0, total - (total % limit || limit)));
+  const rows = await sql<{ id: string }>`
+    SELECT id FROM t_xingce_question
+    WHERE delete_flag = 'NOT_DELETE' AND batch_id = ${batchId} AND status = ${status}
+    ORDER BY id ASC
+    LIMIT ${limit} OFFSET ${offset}
+  `.execute(db);
+  return { ids: rows.rows.map((row) => row.id), total, offset, referenceOnly };
+}
+
 export async function collectionSlice(db: Kysely<Database>, query: CollectionQuery) {
+  if (!needsFullCollection(query)) return sliceOrderedIds(db, query);
   const collection = await loadCollection(db, { ...query, page: 0 });
   let offset = Math.max(0, query.offset ?? 0);
   if (query.questionId) {
