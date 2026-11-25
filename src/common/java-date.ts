@@ -7,6 +7,22 @@ export function formatJavaDate(date: Date): string {
   return date.toISOString().slice(0, 19).replace('T', ' ');
 }
 
+/**
+ * User-entered application time. mysql2 stores DATETIME digits on the UTC
+ * clock, so a valid Shanghai calendar value is kept as those same digits.
+ * Overflow dates such as February 31 fail the round trip, matching Java's
+ * non-lenient GMT+8 parser.
+ */
+export function parseApplicationDate(recordTime: string): Date | null {
+  let text = recordTime.trim();
+  if (text.length === 10) text = `${text} 00:00:00`;
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)) return null;
+  const [year, month, day, hour, minute, second] = text.split(/[- :]/).map(Number);
+  if ([year, month, day, hour, minute, second].some((part) => part == null)) return null;
+  const date = new Date(Date.UTC(year!, month! - 1, day, hour, minute, second));
+  return formatJavaDate(date) === text ? date : null;
+}
+
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 /**

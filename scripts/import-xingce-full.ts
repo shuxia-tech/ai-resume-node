@@ -61,7 +61,7 @@ async function mapPool<T>(items: T[], concurrency: number, worker: (item: T, ind
       const index = cursor;
       cursor += 1;
       if (index >= items.length) return;
-      await worker(items[index], index);
+      await worker(items[index]!, index);
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(items.length, 1)) }, run));

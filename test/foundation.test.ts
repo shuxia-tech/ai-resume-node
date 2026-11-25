@@ -19,6 +19,8 @@ import {
   DEFAULT_PHOTO_STALE_MINUTES,
   isStalePhotoGeneration,
 } from '@/modules/maintenance/photo-compensation.js';
+import { parseApplicationDate } from '@/common/java-date.js';
+import { normalizeReferralSubmission } from '@/modules/campus/referral-submission.js';
 
 const baseEnv = {
   NODE_ENV: 'test',
@@ -74,6 +76,45 @@ describe('foundation', () => {
       isStalePhotoGeneration('2026-09-21T11:45:00.000Z', now, DEFAULT_PHOTO_STALE_MINUTES),
     ).toBe(true);
     expect(isStalePhotoGeneration(null, now)).toBe(false);
+  });
+
+  it('parses a user application date as Shanghai wall-clock digits', () => {
+    expect(parseApplicationDate('2026-03-01')?.toISOString()).toBe('2026-03-01T00:00:00.000Z');
+    expect(parseApplicationDate('2026-03-01 08:30:00')?.toISOString()).toBe('2026-03-01T08:30:00.000Z');
+    expect(parseApplicationDate('2026-02-31')).toBeNull();
+    expect(parseApplicationDate('2026-03-01 25:00:00')).toBeNull();
+    expect(parseApplicationDate('明天')).toBeNull();
+  });
+
+  it('rejects an incomplete referral submission before it reaches the database', () => {
+    expect(() => normalizeReferralSubmission({})).toThrow('请填写公司名称');
+    expect(() =>
+      normalizeReferralSubmission({
+        company: '示例公司',
+        referralCode: 'CODE',
+        referralMethod: 'ftp://files.example.com',
+        positions: '后端',
+        workLocation: '上海',
+        industry: '互联网',
+        identity: '企业员工',
+        name: '张三',
+        contactType: '微信',
+        contact: 'zhangsan',
+      }),
+    ).toThrow('投递链接须以 http:// 或 https:// 开头');
+  });
+
+  it('rejects an unsupported invited-user level before querying', async () => {
+    const app = buildApp(
+      loadEnv({ ...baseEnv, TEST_AUTH_ENABLED: 'true', TEST_USER_ID: 'user', TEST_AUTH_TOKEN: 'token' }),
+    );
+    const response = await app.inject({
+      method: 'GET',
+      url: '/c/resume/invitedUserDetails?level=3',
+      headers: { token: 'token' },
+    });
+    expect(response.json()).toMatchObject({ code: 400, msg: '不支持的代理层级' });
+    await app.close();
   });
 
   it('accepts only matching image signatures for photo uploads', () => {
@@ -267,6 +308,22 @@ describe('foundation', () => {
     ).toThrow('ADMIN_SM2_PRIVATE_KEY is required');
   });
 
+  it('serves the Java /api gateway prefix on the same routes', async () => {
+    const app = buildApp(loadEnv(baseEnv));
+    const health = await app.inject({ method: 'GET', url: '/api/health?probe=1' });
+    expect(health.statusCode).toBe(200);
+    expect(health.json()).toMatchObject({ data: { status: 'ok' } });
+
+    const missingAuth = await app.inject({ method: 'GET', url: '/api/c/resume/memberPackage' });
+    expect(missingAuth.statusCode).not.toBe(404);
+    expect(missingAuth.json()).toMatchObject({ code: 401 });
+
+    const doubled = await app.inject({ method: 'GET', url: '//c/resume/memberPackage' });
+    expect(doubled.statusCode).not.toBe(404);
+    expect(doubled.json()).toMatchObject({ code: 401 });
+    await app.close();
+  });
+
   it('returns the compatibility response envelope', async () => {
     const app = buildApp(loadEnv(baseEnv));
     const response = await app.inject({ method: 'GET', url: '/health' });
@@ -433,6 +490,13 @@ describe('foundation', () => {
       ['POST', '/c/resume/campusRecruitment/record'],
       ['PUT', '/c/resume/campusRecruitment/record/:id'],
       ['DELETE', '/c/resume/campusRecruitment/record/:id'],
+      ['GET', '/c/resume/campusRecruitment/referral/submission'],
+      ['POST', '/c/resume/campusRecruitment/referral/submission'],
+      ['GET', '/app/campusrecruitment/referral/submission/page'],
+      ['GET', '/app/campusrecruitment/referral/submission/pendingCount'],
+      ['POST', '/app/campusrecruitment/referral/submission/approve'],
+      ['POST', '/app/campusrecruitment/referral/submission/reject'],
+      ['POST', '/app/campusrecruitment/referral/submission/delete'],
       ['POST', '/c/resume/campusRecruitment/custom'],
       ['PUT', '/c/resume/campusRecruitment/custom/:id'],
       ['GET', '/c/resume/notification/page/system'],

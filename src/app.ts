@@ -16,6 +16,7 @@ import { registerAiRoutes } from '@/modules/ai/ai-routes.js';
 import { bindCosConfigDatabase } from '@/modules/storage/cos-service.js';
 import { registerStorageRoutes } from '@/modules/storage/storage-routes.js';
 import { registerCampusRoutes } from '@/modules/campus/campus-routes.js';
+import { registerReferralSubmissionRoutes } from '@/modules/campus/referral-submission.js';
 import { registerDictRoutes } from '@/modules/admin/dict-routes.js';
 import { registerAdminAuthRoutes } from '@/modules/admin/admin-auth-routes.js';
 import { registerAdminMenuRoutes } from '@/modules/admin/admin-menu-routes.js';
@@ -37,8 +38,28 @@ import { registerPaymentWebSocket } from '@/modules/payment/payment-websocket.js
 import { closeAuthRedis, pingAuthRedis } from '@/auth/request-user.js';
 import { registerMaintenanceJobs } from '@/modules/maintenance/photo-compensation.js';
 
+/**
+ * Production nginx `location /api` plus `proxy_pass .../` forwards
+ * `/api/c/...` as `//c/...`. Java normalized that; Fastify does not.
+ * Also accept a gateway that leaves the `/api` prefix intact.
+ */
+export function stripApiPrefix(url: string) {
+  const queryAt = url.indexOf('?');
+  const path = queryAt === -1 ? url : url.slice(0, queryAt);
+  const query = queryAt === -1 ? '' : url.slice(queryAt);
+  let normalized = path.replace(/\/{2,}/g, '/');
+  if (normalized === '/api') normalized = '/';
+  else if (normalized.startsWith('/api/')) normalized = normalized.slice(4);
+  return `${normalized}${query}`;
+}
+
 export function buildApp(env: AppEnv = loadEnv()): FastifyInstance {
-  const app = Fastify({ logger: { level: env.LOG_LEVEL } });
+  const app = Fastify({
+    logger: { level: env.LOG_LEVEL },
+    rewriteUrl(request) {
+      return stripApiPrefix(request.url ?? '/');
+    },
+  });
 
   const corsOrigins = env.CORS_ORIGINS.split(',')
     .map((origin) => origin.trim())
@@ -97,6 +118,7 @@ export function buildApp(env: AppEnv = loadEnv()): FastifyInstance {
   registerAiRoutes(app, env, database);
   registerStorageRoutes(app, env);
   registerCampusRoutes(app, env, database);
+  registerReferralSubmissionRoutes(app, env, database);
   registerDictRoutes(app, env, database);
   registerAdminAuthRoutes(app, env, database);
   registerAdminMenuRoutes(app, env, database);

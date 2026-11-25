@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { sql, type Kysely } from 'kysely';
 import { AppError } from '@/common/errors.js';
 import { ok } from '@/common/http-response.js';
-import { requireUser, requestToken } from '@/auth/request-user.js';
+import { requireLogin, requireUser, requestToken } from '@/auth/request-user.js';
 import { requireAdmin } from '@/modules/admin/admin-auth-routes.js';
 import type { AppEnv } from '@/config/env.js';
 import type { Database } from '@/infrastructure/database.js';
@@ -246,6 +246,7 @@ export function registerXingceUserRoutes(
   db: Kysely<Database>,
 ) {
   const authenticate = requireUser(env);
+  const loginRequired = requireLogin(env);
   const adminGuard = requireAdmin(env, db);
 
   app.get('/c/xingce/home', async () => {
@@ -284,7 +285,7 @@ export function registerXingceUserRoutes(
     });
   });
 
-  app.post<{ Body: { ids?: string[] } }>('/c/xingce/questions/lookup', async (request) => {
+  app.post<{ Body: { ids?: string[] } }>('/c/xingce/questions/lookup', { preHandler: loginRequired }, async (request) => {
     await ensureUserTables(db);
     const ids = (Array.isArray(request.body?.ids) ? request.body.ids : [])
       .map((id) => String(id).slice(0, 160))
@@ -348,6 +349,7 @@ export function registerXingceUserRoutes(
 
   app.get<{ Querystring: Record<string, string | undefined> }>(
     '/c/xingce/practice',
+    { preHandler: loginRequired },
     async (request) => {
       await ensureUserTables(db);
       const offset = Math.max(0, Math.min(50_000, Number(request.query.offset) || 0));

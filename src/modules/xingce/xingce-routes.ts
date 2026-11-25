@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { sql, type Kysely } from 'kysely';
 import { AppError } from '@/common/errors.js';
+import { requireLogin } from '@/auth/request-user.js';
 import { ok } from '@/common/http-response.js';
 import { requireAdmin } from '@/modules/admin/admin-auth-routes.js';
 import { uploadToCosKey } from '@/modules/storage/cos-service.js';
@@ -446,6 +447,7 @@ export function registerXingceRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
 
   app.get<{ Querystring: { batchId?: string; offset?: string } }>(
     '/c/xingce/questions',
+    { preHandler: requireLogin(env) },
     async (request) => {
       await ensureXingceTables(db);
       const batchId = request.query.batchId?.slice(0, 80) ?? '';

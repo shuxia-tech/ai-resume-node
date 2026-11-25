@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { sql } from 'kysely';
 import { AppError } from '@/common/errors.js';
 import { ok } from '@/common/http-response.js';
-import { isActiveShanghaiWallClock } from '@/common/java-date.js';
+import { isActiveShanghaiWallClock, parseApplicationDate } from '@/common/java-date.js';
 import { requireUser } from '@/auth/request-user.js';
 import type { AppEnv } from '@/config/env.js';
 import type { CampusRecruitmentRow, Database } from '@/infrastructure/database.js';
@@ -364,7 +364,7 @@ export function registerCampusRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
         recordDisplayColumn('referral_method', 'referralMethod'),
         recordDisplayColumn('progress_check', 'progressCheck'),
         recordDisplayColumn('remarks', 'remarks'),
-        recordDisplayColumn('record_time', 'recordTime'),
+        sql`IFNULL(cru.record_time, cr.record_time)`.as('recordTime'),
         recordDisplayColumn('expiration_time', 'expirationTime'),
         recordDisplayColumn('main_business', 'mainBusiness'),
         recordDisplayColumn('info_type', 'infoType'),
@@ -417,7 +417,8 @@ export function registerCampusRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
       .select(({ fn }: any) => fn.countAll().as('count'));
     const [records, count] = await Promise.all([
       base
-        .orderBy('cru.update_time', 'desc')
+        .orderBy(sql`IFNULL(cru.record_time, cr.record_time)`, 'desc')
+        .orderBy('cru.id', 'desc')
         .limit(size)
         .offset((current - 1) * size)
         .execute(),
@@ -581,6 +582,12 @@ async function updateUserRecord(
   }
   if (filled(body.recruitmentStatus)) patch.recruitment_status = body.recruitmentStatus;
   if (filled(body.recruitmentRemarks)) patch.recruitment_remarks = body.recruitmentRemarks;
+  const recordTime = (body as { recordTime?: unknown }).recordTime ?? body.record_time;
+  if (typeof recordTime === 'string' && recordTime.trim()) {
+    const applicationDate = parseApplicationDate(recordTime);
+    if (!applicationDate) throw new AppError(400, '投递时间无效');
+    patch.record_time = applicationDate;
+  }
   await db
     .updateTable('sc_campus_recruitment_user')
     .set(patch as any)

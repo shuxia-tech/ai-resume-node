@@ -154,7 +154,7 @@ function normalizeClientUser(body: Record<string, unknown>) {
 
 const RESOURCES: AdminResource[] = [
   table('/client/user', 'client_user', {
-    orderBy: ['id desc'],
+    orderBy: ['createTime desc'],
     searchLike: ['nickname'],
     searchEq: ['invitationCode'],
     hidden: ['password'],

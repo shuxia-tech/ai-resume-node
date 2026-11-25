@@ -2,11 +2,12 @@ import type { FastifyInstance } from 'fastify';
 import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
 import { readRedisSetSize, requireUser } from '@/auth/request-user.js';
+import { AppError } from '@/common/errors.js';
 import { ok } from '@/common/http-response.js';
 import type { AppEnv } from '@/config/env.js';
 import type { Database } from '@/infrastructure/database.js';
 
-type DistributionQuery = { page?: string; limit?: string; userNameKeyword?: string };
+type DistributionQuery = { page?: string; limit?: string; userNameKeyword?: string; level?: string };
 
 function pageValue(value: string | undefined, fallback: number, max: number) {
   const parsed = Number(value ?? fallback);
@@ -28,6 +29,38 @@ function numberValue(value: unknown) {
   return Number(value ?? 0);
 }
 
+function agentLevel(value: string | undefined) {
+  const text = value?.trim() ?? '';
+  if (!text) return null;
+  const level = Number(text);
+  if (level !== 1 && level !== 2) throw new AppError(400, '不支持的代理层级');
+  return level;
+}
+
+function directAgentFilter(userId: string) {
+  return sql`
+    SELECT DISTINCT direct_relation.target_id
+    FROM t_front_relation direct_relation
+    INNER JOIN client_user direct_user ON direct_user.id = direct_relation.target_id
+      AND direct_user.delete_flag = 'NOT_DELETE'
+    WHERE direct_relation.user_id = ${userId}
+      AND direct_relation.target_id <> ${userId}
+      AND direct_relation.category IN ('用户优惠码关联', '用户邀请码关联')
+  `;
+}
+
+function invitedLevelFilter(level: number | null, userId: string) {
+  if (level === 1) return sql`AND fr.user_id = ${userId} AND fr.target_id <> ${userId}`;
+  if (level === 2) {
+    return sql`
+      AND fr.target_id <> ${userId}
+      AND fr.user_id IN (${directAgentFilter(userId)})
+      AND fr.target_id NOT IN (${directAgentFilter(userId)})
+    `;
+  }
+  return sql`AND fr.user_id = ${userId}`;
+}
+
 function maskUserName(userName: string | null) {
   if (!userName) return userName;
   if (userName.length === 1) return userName;
@@ -43,7 +76,7 @@ export function registerDistributionRoutes(
 
   app.get('/c/resume/distribution/stat', { preHandler: authenticate }, async (request) => {
     const userId = request.userId as string;
-    const [user, aggregate, relationCount, redeem] = await Promise.all([
+    const [user, aggregate, relationCount, redeem, firstLevel, secondLevel] = await Promise.all([
       db
         .selectFrom('client_user')
         .select([
@@ -90,6 +123,23 @@ export function registerDistributionRoutes(
         .where('delete_flag', '=', 'NOT_DELETE')
         .orderBy('create_time', 'desc')
         .executeTakeFirst(),
+      sql<{ count: number | string }>`
+        SELECT COUNT(DISTINCT fr.target_id) AS count
+        FROM t_front_relation fr
+        INNER JOIN client_user cu ON cu.id = fr.target_id AND cu.delete_flag = 'NOT_DELETE'
+        WHERE fr.user_id = ${userId}
+          AND fr.target_id <> ${userId}
+          AND fr.category IN ('用户优惠码关联', '用户邀请码关联')
+      `.execute(db),
+      sql<{ count: number | string }>`
+        SELECT COUNT(DISTINCT fr.target_id) AS count
+        FROM t_front_relation fr
+        INNER JOIN client_user cu ON cu.id = fr.target_id AND cu.delete_flag = 'NOT_DELETE'
+        WHERE fr.category IN ('用户优惠码关联', '用户邀请码关联')
+          AND fr.target_id <> ${userId}
+          AND fr.user_id IN (${directAgentFilter(userId)})
+          AND fr.target_id NOT IN (${directAgentFilter(userId)})
+      `.execute(db),
     ]);
     const inviteRebate = numberValue(aggregate?.inviteRebateTotalAmount);
     const subRebate = numberValue(aggregate?.subReferralRebateRate);
@@ -124,6 +174,8 @@ export function registerDistributionRoutes(
       discountsCodeRebateRate: redeem?.rebateRate ?? null,
       discountRebate,
       invitationCode: user?.invitationCode ?? null,
+      firstLevelAgentCount: numberValue(firstLevel.rows[0]?.count),
+      secondLevelAgentCount: numberValue(secondLevel.rows[0]?.count),
     });
   });
 
@@ -170,8 +222,10 @@ export function registerDistributionRoutes(
     const current = pageValue(query.page, 1, 10_000);
     const size = pageValue(query.limit, 10, 100);
     const userId = request.userId as string;
+    const level = agentLevel(query.level);
     const keyword = query.userNameKeyword?.trim() ?? '';
     const keywordFilter = keyword ? sql`AND cu.name LIKE ${`%${keyword}%`}` : sql``;
+    const levelFilter = invitedLevelFilter(level, userId);
     const records = await sql<{
       userId: string;
       userName: string | null;
@@ -190,7 +244,6 @@ export function registerDistributionRoutes(
       FROM client_user cu
       INNER JOIN t_front_relation fr
         ON fr.target_id = cu.id
-        AND fr.user_id = ${userId}
         AND fr.category IN ('用户优惠码关联', '用户邀请码关联')
       LEFT JOIN (
         SELECT user_id, SUM(amount / 100) AS totalConsumption
@@ -206,6 +259,7 @@ export function registerDistributionRoutes(
         GROUP BY target_user_id
       ) rebate_sum ON rebate_sum.target_user_id = cu.id
       WHERE cu.delete_flag = 'NOT_DELETE'
+        ${levelFilter}
         ${keywordFilter}
       GROUP BY cu.id, cu.NICKNAME, cu.user_status, recharge_sum.totalConsumption, rebate_sum.rebateAmount
       ORDER BY rebateAmount DESC
@@ -216,26 +270,25 @@ export function registerDistributionRoutes(
       FROM client_user cu
       INNER JOIN t_front_relation fr
         ON fr.target_id = cu.id
-        AND fr.user_id = ${userId}
         AND fr.category IN ('用户优惠码关联', '用户邀请码关联')
       WHERE cu.delete_flag = 'NOT_DELETE'
+        ${levelFilter}
         ${keywordFilter}
     `.execute(db);
-    return ok(
-      pageData(
-        records.rows.map((record) => ({
-          userId: record.userId == null ? record.userId : String(record.userId),
-          userName: maskUserName(record.userName),
-          totalConsumption: numberValue(record.totalConsumption),
-          rebateAmount: numberValue(record.rebateAmount),
-          inviteTime: record.inviteTime,
-          userStatus: record.userStatus,
-        })),
-        numberValue(count.rows[0]?.count),
-        current,
-        size,
-      ),
+    const page = pageData(
+      records.rows.map((record) => ({
+        userId: record.userId == null ? record.userId : String(record.userId),
+        userName: maskUserName(record.userName),
+        totalConsumption: numberValue(record.totalConsumption),
+        rebateAmount: numberValue(record.rebateAmount),
+        inviteTime: record.inviteTime,
+        userStatus: record.userStatus,
+      })),
+      numberValue(count.rows[0]?.count),
+      current,
+      size,
     );
+    return ok(level == null ? page : { ...page, level });
   });
 
   app.get<{ Params: { invitationCode: string } }>(

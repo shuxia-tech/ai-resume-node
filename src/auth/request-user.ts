@@ -183,6 +183,18 @@ export function requireUser(env: AppEnv) {
   };
 }
 
+export function requireLogin(env: AppEnv) {
+  const authenticate = requireUser(env);
+  return async function loginRequired(request: FastifyRequest): Promise<void> {
+    try {
+      await authenticate(request);
+    } catch (error) {
+      if (error instanceof AppError && error.code === 401) throw new AppError(401, '请先登录');
+      throw error;
+    }
+  };
+}
+
 export async function closeAuthRedis(): Promise<void> {
   if (redisClient) {
     await redisClient.quit();
