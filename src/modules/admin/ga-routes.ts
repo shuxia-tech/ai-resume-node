@@ -7,6 +7,7 @@ import { AppError } from '@/common/errors.js';
 import { ok } from '@/common/http-response.js';
 import type { AppEnv } from '@/config/env.js';
 import type { Database } from '@/infrastructure/database.js';
+import { registerGaCollectRoutes } from '@/modules/admin/ga-collect.js';
 
 const DEFAULT_MEASUREMENT_ID = 'G-SCTLNG6CV3';
 const DEFAULT_SITE_NAME = 'offer星球';
@@ -176,6 +177,7 @@ async function many<T>(db: Kysely<Database>, query: ReturnType<typeof sql>): Pro
 }
 
 export function registerGaAdminRoutes(app: FastifyInstance, env: AppEnv, db: Kysely<Database>) {
+  registerGaCollectRoutes(app, db);
   const adminGuard = requireAdmin(env, db);
 
   async function dashboard(request: FastifyRequest<{ Querystring: DashboardQuery }>) {

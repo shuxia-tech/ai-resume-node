@@ -31,21 +31,76 @@ type WechatUserResponse = WechatTokenResponse & {
 };
 
 type WechatProfile = Omit<WechatUserResponse, 'unionid'> & { unionid: string | null };
+type WechatChannel = 'open' | 'mp';
 
-function authorizeUrl(env: AppEnv, webName?: string, scope = 'snsapi_login') {
+function isWeChatBrowser(request: { headers: { 'user-agent'?: string | string[] | undefined } }) {
+  const header = request.headers['user-agent'];
+  const userAgent = Array.isArray(header) ? header.join(' ') : (header ?? '');
+  return /MicroMessenger/i.test(userAgent);
+}
+
+function connectUrl(appId: string, redirectUri: string, scope: 'snsapi_login' | 'snsapi_userinfo') {
+  const params = new URLSearchParams({
+    appid: appId,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope,
+    state: randomUUID(),
+  });
+  const endpoint =
+    scope === 'snsapi_login'
+      ? 'https://open.weixin.qq.com/connect/qrconnect'
+      : 'https://open.weixin.qq.com/connect/oauth2/authorize';
+  return `${endpoint}?${params.toString()}#wechat_redirect`;
+}
+
+function authorizeUrl(env: AppEnv, webName?: string) {
   const redirectUri = redirectUriFor(env, webName);
   if (!env.WECHAT_APP_ID || !redirectUri) throw new AppError(503, '微信登录未配置');
   const redirect = redirectUri.includes('webName=')
     ? redirectUri
     : `${redirectUri}${redirectUri.includes('?') ? '&' : '?'}webName=${encodeURIComponent(webName ?? 'resume')}`;
-  const params = new URLSearchParams({
-    appid: env.WECHAT_APP_ID,
-    redirect_uri: redirect,
-    response_type: 'code',
-    scope,
-    state: randomUUID(),
-  });
-  return `https://open.weixin.qq.com/connect/qrconnect?${params.toString()}#wechat_redirect`;
+  return connectUrl(env.WECHAT_APP_ID, redirect, 'snsapi_login');
+}
+
+function mpRedirectFor(env: AppEnv, webName?: string) {
+  const explicit =
+    webName === 'offer'
+      ? env.WECHAT_MP_REDIRECT_URI_OFFER
+      : webName === 'photo'
+        ? env.WECHAT_MP_REDIRECT_URI_PHOTO
+        : webName === 'campus'
+          ? env.WECHAT_MP_REDIRECT_URI_CAMPUS
+          : webName === 'jisu'
+            ? env.WECHAT_MP_REDIRECT_URI_JISU
+            : webName === 'xingce'
+              ? env.WECHAT_MP_REDIRECT_URI_XINGCE
+              : env.WECHAT_MP_REDIRECT_URI;
+  if (explicit) return explicit;
+  const template =
+    env.WECHAT_REDIRECT_URI ?? env.WECHAT_REDIRECT_URI_OFFER ?? env.WECHAT_REDIRECT_URI_JISU;
+  if (!template) return undefined;
+  const url = new URL(template);
+  if (!url.pathname.endsWith('/callback/wechat')) return undefined;
+  const suffix = !webName || webName === 'resume' ? '' : `/${webName}`;
+  url.pathname = url.pathname.replace(/\/callback\/wechat$/, `/wx/getOpenId${suffix}`);
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+function mpAuthorizeUrl(env: AppEnv, webName?: string) {
+  const redirectUri = mpRedirectFor(env, webName);
+  if (!env.WECHAT_MP_APP_ID || !env.WECHAT_MP_APP_SECRET || !redirectUri) {
+    throw new AppError(503, '微信公众号网页授权未配置');
+  }
+  if (webName === 'campus' && !env.FRONT_REDIRECT_URI_CAMPUS) {
+    throw new AppError(503, '缺少校园市场圈微信公众号或前台回调配置');
+  }
+  if (webName === 'jisu' && !env.FRONT_REDIRECT_URI_JISU) {
+    throw new AppError(503, '缺少极速海投前台登录回调配置');
+  }
+  return connectUrl(env.WECHAT_MP_APP_ID, redirectUri, 'snsapi_userinfo');
 }
 
 function redirectUriFor(env: AppEnv, webName?: string) {
@@ -74,12 +129,20 @@ function throwWechatError(payload: WechatTokenResponse): never {
   throw new AppError(502, `微信授权失败${payload.errmsg ? `：${payload.errmsg}` : ''}`);
 }
 
-async function loadWechatUser(env: AppEnv, code: string): Promise<WechatProfile> {
-  if (!env.WECHAT_APP_ID || !env.WECHAT_APP_SECRET) throw new AppError(503, '微信登录未配置');
+async function loadWechatUser(
+  env: AppEnv,
+  code: string,
+  channel: WechatChannel = 'open',
+): Promise<WechatProfile> {
+  const appId = channel === 'mp' ? env.WECHAT_MP_APP_ID : env.WECHAT_APP_ID;
+  const secret = channel === 'mp' ? env.WECHAT_MP_APP_SECRET : env.WECHAT_APP_SECRET;
+  if (!appId || !secret) {
+    throw new AppError(503, channel === 'mp' ? '微信公众号网页授权未配置' : '微信登录未配置');
+  }
   const tokenUrl = new URL('https://api.weixin.qq.com/sns/oauth2/access_token');
   tokenUrl.search = new URLSearchParams({
-    appid: env.WECHAT_APP_ID,
-    secret: env.WECHAT_APP_SECRET,
+    appid: appId,
+    secret,
     code,
     grant_type: 'authorization_code',
   }).toString();
@@ -264,28 +327,31 @@ function mapUser(
 
 export function registerAuthRoutes(app: FastifyInstance, env: AppEnv, db: Kysely<Database>) {
   const authenticate = requireUser(env);
-  app.post('/oauth/resume/render/wechat', async (request) =>
-    ok(authorizeUrl(env, String((request.query as any).webName ?? 'resume'))),
-  );
-  app.get('/oauth/resume/render/wechat', async (request) =>
-    ok(authorizeUrl(env, String((request.query as any).webName ?? 'resume'))),
-  );
+  function loginUrl(request: {
+    headers: { 'user-agent'?: string | string[] | undefined };
+    query: unknown;
+  }) {
+    const webName = String((request.query as any).webName ?? 'resume');
+    return isWeChatBrowser(request) ? mpAuthorizeUrl(env, webName) : authorizeUrl(env, webName);
+  }
+  app.post('/oauth/resume/render/wechat', async (request) => ok(loginUrl(request)));
+  app.get('/oauth/resume/render/wechat', async (request) => ok(loginUrl(request)));
   app.get('/oauth/resume/wx/getCode', async (request) =>
-    ok(authorizeUrl(env, String((request.query as any).webName ?? 'resume'), 'snsapi_userinfo')),
+    ok(mpAuthorizeUrl(env, String((request.query as any).webName ?? 'resume'))),
   );
-  app.get('/oauth/resume/wx/getCode/offer', async () =>
-    ok(authorizeUrl(env, 'offer', 'snsapi_userinfo')),
-  );
-  app.get('/oauth/resume/wx/getCode/campus', async () =>
-    ok(authorizeUrl(env, 'campus', 'snsapi_userinfo')),
-  );
-  app.get('/oauth/resume/wx/getCode/jisu', async () =>
-    ok(authorizeUrl(env, 'jisu', 'snsapi_userinfo')),
-  );
-  async function completeWechatCallback(request: any, reply: any, webName?: string) {
+  app.get('/oauth/resume/wx/getCode/offer', async () => ok(mpAuthorizeUrl(env, 'offer')));
+  app.get('/oauth/resume/wx/getCode/photo', async () => ok(mpAuthorizeUrl(env, 'photo')));
+  app.get('/oauth/resume/wx/getCode/campus', async () => ok(mpAuthorizeUrl(env, 'campus')));
+  app.get('/oauth/resume/wx/getCode/jisu', async () => ok(mpAuthorizeUrl(env, 'jisu')));
+  async function completeWechatCallback(
+    request: any,
+    reply: any,
+    webName?: string,
+    channel: WechatChannel = 'open',
+  ) {
     const { code } = request.query as { code?: string };
     if (!code) throw new AppError(400, '微信授权 code 不能为空');
-    const profile = await loadWechatUser(env, code);
+    const profile = await loadWechatUser(env, code, channel);
     const userId = await findOrCreateWechatUser(db, profile);
     const token = randomBytes(32).toString('hex');
     await saveClientToken(env, token, userId);
@@ -299,15 +365,23 @@ export function registerAuthRoutes(app: FastifyInstance, env: AppEnv, db: Kysely
       `${redirect}${separator}${redirect.endsWith('=') ? '' : 'token='}${encodeURIComponent(token)}`,
     );
   }
-  app.get('/oauth/resume/wx/getOpenId', (request, reply) => completeWechatCallback(request, reply));
+  app.get('/oauth/resume/wx/getOpenId', (request, reply) =>
+    completeWechatCallback(request, reply, undefined, 'mp'),
+  );
   app.get('/oauth/resume/wx/getOpenId/offer', (request, reply) =>
-    completeWechatCallback(request, reply, 'offer'),
+    completeWechatCallback(request, reply, 'offer', 'mp'),
+  );
+  app.get('/oauth/resume/wx/getOpenId/photo', (request, reply) =>
+    completeWechatCallback(request, reply, 'photo', 'mp'),
   );
   app.get('/oauth/resume/wx/getOpenId/campus', (request, reply) =>
-    completeWechatCallback(request, reply, 'campus'),
+    completeWechatCallback(request, reply, 'campus', 'mp'),
   );
   app.get('/oauth/resume/wx/getOpenId/jisu', (request, reply) =>
-    completeWechatCallback(request, reply, 'jisu'),
+    completeWechatCallback(request, reply, 'jisu', 'mp'),
+  );
+  app.get('/oauth/resume/wx/getOpenId/xingce', (request, reply) =>
+    completeWechatCallback(request, reply, 'xingce', 'mp'),
   );
   app.get('/oauth/resume/callback/wechat', (request, reply) =>
     completeWechatCallback(

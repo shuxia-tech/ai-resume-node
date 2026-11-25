@@ -404,7 +404,10 @@ describe('foundation', () => {
     const app = buildApp(
       loadEnv({
         ...baseEnv,
-        WECHAT_APP_ID: 'wx-jisu',
+        WECHAT_APP_ID: 'wx-open',
+        WECHAT_MP_APP_ID: 'wx-mp',
+        WECHAT_MP_APP_SECRET: 'mp-secret',
+        WECHAT_REDIRECT_URI: 'https://api.gfjianli.com/api/oauth/resume/callback/wechat',
         WECHAT_REDIRECT_URI_JISU:
           'https://api.gfjianli.com/api/oauth/resume/callback/wechat?webName=jisu',
         FRONT_REDIRECT_URI_JISU: 'https://jisuhaitou.gfjianli.com/?token=',
@@ -413,12 +416,35 @@ describe('foundation', () => {
     const response = await app.inject({ method: 'GET', url: '/oauth/resume/wx/getCode/jisu' });
     expect(response.statusCode).toBe(200);
     const url = String(response.json().data);
-    expect(url).toContain('appid=wx-jisu');
-    expect(url).toContain(encodeURIComponent('webName=jisu'));
+    expect(url.startsWith('https://open.weixin.qq.com/connect/oauth2/authorize?')).toBe(true);
+    expect(url).toContain('appid=wx-mp');
+    expect(url).toContain(
+      encodeURIComponent('https://api.gfjianli.com/api/oauth/resume/wx/getOpenId/jisu'),
+    );
     expect(url).toContain('snsapi_userinfo');
+    expect(url).not.toContain('qrconnect');
+    const desktop = await app.inject({
+      method: 'POST',
+      url: '/oauth/resume/render/wechat?webName=jisu',
+    });
+    const qrUrl = String(desktop.json().data);
+    expect(qrUrl.startsWith('https://open.weixin.qq.com/connect/qrconnect?')).toBe(true);
+    expect(qrUrl).toContain('appid=wx-open');
+    expect(qrUrl).toContain('snsapi_login');
+    const mobile = await app.inject({
+      method: 'POST',
+      url: '/oauth/resume/render/wechat?webName=photo',
+      headers: { 'user-agent': 'Mozilla/5.0 MicroMessenger/8.0' },
+    });
+    const mobileUrl = String(mobile.json().data);
+    expect(mobileUrl.startsWith('https://open.weixin.qq.com/connect/oauth2/authorize?')).toBe(true);
+    expect(mobileUrl).toContain(
+      encodeURIComponent('https://api.gfjianli.com/api/oauth/resume/wx/getOpenId/photo'),
+    );
+    expect(mobileUrl).toContain('snsapi_userinfo');
     await app.close();
 
-    const missing = buildApp(loadEnv({ ...baseEnv, WECHAT_APP_ID: 'wx-jisu' }));
+    const missing = buildApp(loadEnv({ ...baseEnv, WECHAT_APP_ID: 'wx-open' }));
     const denied = await missing.inject({
       method: 'GET',
       url: '/oauth/resume/render/wechat?webName=jisu',

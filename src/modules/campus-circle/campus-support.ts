@@ -66,7 +66,11 @@ export const PROJECT_OPERATIONS = new Set([HIDE, SHOW, PIN, UNPIN]);
 
 const SM4_KEY = '0123456789abcdeffedcba9876543210';
 const SM4_IV = 'fedcba98765432100123456789abcdef';
-const SM4_OPTIONS = { mode: 'cbc', iv: SM4_IV };
+// Java sm-crypto 0.3.2 only forwards CBC options when padding is pkcs#5.
+// CommonCryptogramUtil never sets padding, so the rows already in MySQL are ECB.
+// Node previously wrote real CBC, so reads accept both.
+const SM4_ECB = { padding: 'pkcs#5', mode: 'ecb' } as const;
+const SM4_CBC = { padding: 'pkcs#5', mode: 'cbc', iv: SM4_IV } as const;
 const SNOWY_SM2_PRIVATE_KEY = '3037723d47292171677ec8bd7dc9af696c7472bc5f251b2cec07e65fdef22e25';
 const ADMIN_ORIGINS = new Set(['https://campus.gfjianli.com', 'http://localhost:3200']);
 const TOKEN_TTL = 8_592_000;
@@ -157,20 +161,24 @@ export function shanghaiStart(day = shanghaiDay()): Date {
   return new Date(`${day}T00:00:00+08:00`);
 }
 
+function sm4Open(source: string, options: { padding: 'pkcs#5'; mode: 'ecb' | 'cbc'; iv?: string }) {
+  try {
+    const plain = smCrypto.sm4.decrypt(source, SM4_KEY, options);
+    return plain === '' ? null : plain;
+  } catch {
+    return null;
+  }
+}
+
 export function sm4Encrypt(value: string | null | undefined): string | null {
   if (!value) return null;
-  return smCrypto.sm4.encrypt(value, SM4_KEY, SM4_OPTIONS);
+  return smCrypto.sm4.encrypt(value, SM4_KEY, SM4_ECB);
 }
 
 export function sm4Decrypt(value: unknown): string | null {
   if (value == null || value === '') return value == null ? null : '';
   const source = String(value);
-  try {
-    const plain = smCrypto.sm4.decrypt(source, SM4_KEY, SM4_OPTIONS);
-    return plain === '' ? source : plain;
-  } catch {
-    return source;
-  }
+  return sm4Open(source, SM4_CBC) ?? sm4Open(source, SM4_ECB) ?? source;
 }
 
 export function decryptAdminPassword(encrypted: string, env: AppEnv): string {
