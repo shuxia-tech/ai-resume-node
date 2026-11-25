@@ -69,7 +69,9 @@ export function buildApp(env: AppEnv = loadEnv()): FastifyInstance {
     credentials: true,
     methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
   });
-  app.register(helmet);
+  // The tracker is loaded by other site origins. Helmet's default
+  // same-origin resource policy makes the browser discard that script.
+  app.register(helmet, { crossOriginResourcePolicy: { policy: 'cross-origin' } });
   app.register(sensible);
   app.register(multipart, { limits: { fileSize: 20 * 1024 * 1024, files: 1 } });
 
