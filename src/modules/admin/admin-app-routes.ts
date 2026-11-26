@@ -215,6 +215,7 @@ const RESOURCES: AdminResource[] = [
     },
   }),
   table('/app/campusrecruitment', 'sc_campus_recruitment', {
+    orderBy: ['createTime desc', 'id asc'],
     query: { company: 'like', workLocation: 'like', industry: 'like', positions: 'like', infoType: 'eq' },
   }),
   table('/app/notification', 'sc_notification', {

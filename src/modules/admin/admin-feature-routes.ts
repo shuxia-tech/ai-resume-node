@@ -835,13 +835,13 @@ async function importCampus(db: Kysely<Database>, request: FastifyRequest, infoT
     );
   }
   if (rows.length === 0) throw new AppError(400, '未找到有效数据');
-  for (const row of rows) {
+  for (const [index, row] of rows.entries()) {
     await sql`
       INSERT INTO sc_campus_recruitment (
         id, create_time, record_time, expiration_time, company, referral_code, referral_method,
         title, work_location, industry, positions, remarks, main_business, info_type
       ) VALUES (
-        ${nextAdminId()}, NOW(), ${row.recordTime ?? null}, ${queryText(row.expirationTime) || null},
+        ${nextAdminId()}, DATE_SUB(NOW(), INTERVAL ${sql.raw(String(index))} SECOND), ${row.recordTime ?? null}, ${queryText(row.expirationTime) || null},
         ${queryText(row.company)}, ${queryText(row.referralCode) || null}, ${queryText(row.referralMethod) || null},
         ${queryText(row.title) || null}, ${queryText(row.workLocation) || null}, ${queryText(row.industry) || null},
         ${queryText(row.positions) || null}, ${queryText(row.remarks) || null}, ${queryText(row.mainBusiness) || null},
@@ -852,12 +852,17 @@ async function importCampus(db: Kysely<Database>, request: FastifyRequest, infoT
   return ok(`成功导入 ${rows.length} 条数据`);
 }
 
-function cellText(value: ExcelJS.CellValue): string {
+export function cellText(value: ExcelJS.CellValue): string {
   if (value == null) return '';
   if (value instanceof Date) return formatDate(parseExcelDate(value));
-  if (typeof value === 'object' && 'richText' in value) return value.richText.map((item) => item.text).join('').trim();
-  if (typeof value === 'object' && 'text' in value) return String(value.text).trim();
-  if (typeof value === 'object' && 'result' in value) return cellText(value.result as ExcelJS.CellValue);
+  if (typeof value === 'object') {
+    if ('richText' in value) return value.richText.map((item) => item.text).join('').trim();
+    const text = 'text' in value ? cellText(value.text as ExcelJS.CellValue) : '';
+    if (text) return text;
+    if ('hyperlink' in value && typeof value.hyperlink === 'string') return value.hyperlink.trim();
+    if ('result' in value) return cellText(value.result as ExcelJS.CellValue);
+    return '';
+  }
   return String(value).trim();
 }
 
