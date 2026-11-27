@@ -187,9 +187,10 @@ async function memberSummary(db: Kysely<Database>, userId: string, name: string)
     name: string;
     invitation_code: string;
     expires_at: Date;
+    joined_at: Date;
     invited: number;
   }>`
-    SELECT m.name, m.invitation_code, m.expires_at,
+    SELECT m.name, m.invitation_code, m.expires_at, m.joined_at,
       (SELECT COUNT(*) FROM t_xingce_referral r WHERE r.inviter_id = m.user_id) AS invited
     FROM t_xingce_member m WHERE m.user_id = ${userId}
   `.execute(db);
@@ -207,16 +208,19 @@ async function memberSummary(db: Kysely<Database>, userId: string, name: string)
     LIMIT 20
   `.execute(db);
   const expires = new Date(member.expires_at);
+  const earnedDays = Number(earned.rows[0]?.days ?? 0);
+  const joinedAt = new Date(member.joined_at).getTime();
+  const opened = earnedDays > 0 || expires.getTime() > joinedAt + 1000;
   return {
     id: userId,
     authenticated: true,
     joined: true,
     name: member.name,
     invitationCode: member.invitation_code,
-    isMember: expires.getTime() > Date.now(),
-    memberExpiresAt: expires.toISOString(),
+    isMember: opened && expires.getTime() > Date.now(),
+    ...(opened ? { memberExpiresAt: expires.toISOString() } : {}),
     invitedCount: Number(member.invited),
-    earnedDays: Number(earned.rows[0]?.days ?? 0),
+    earnedDays,
     history: history.rows.map((item) => ({
       name: item.name,
       awardedAt: new Date(item.awarded_at).toISOString(),

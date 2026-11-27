@@ -1000,7 +1000,7 @@ async function grantPackage(
   user: any,
   sourceKey?: string,
 ) {
-  if (webName === 'xingce') {
+  if (webName === 'xingce' || memberPackage.ext_json === '行测超人') {
     const days = Number(memberPackage.gift_day ?? 0);
     await grantXingceMembership(
       db,

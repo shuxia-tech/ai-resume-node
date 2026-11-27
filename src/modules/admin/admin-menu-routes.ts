@@ -54,7 +54,7 @@ const SEED: Array<Omit<MenuRow, 'enabled' | 'deleted'> & { enabled?: number }> =
   { id: 'resume-report', parentId: 'resume-group', title: '简历报告', path: '/business/resume-report', icon: 'Tickets', sortCode: 30, protected: 0 },
   { id: 'ad-slot', parentId: null, title: '营销广告', path: '/business/ad-slot', icon: 'Picture', sortCode: 80, protected: 0 },
   { id: 'member-package', parentId: null, title: '会员套餐', path: '/business/member-package', icon: 'Goods', sortCode: 90, protected: 0 },
-  { id: 'payment-order', parentId: null, title: '订单列表', path: '/business/payment-order', icon: 'Wallet', sortCode: 95, protected: 0 },
+  { id: 'payment-order', parentId: null, title: '订单列表', path: '/orders', icon: 'Wallet', sortCode: 95, protected: 0 },
   { id: 'notification', parentId: null, title: '通知', path: '/business/notification', icon: 'Bell', sortCode: 100, protected: 0 },
   { id: 'resume-tags', parentId: null, title: '标签关联', path: '/business/resume-tags', icon: 'PriceTag', sortCode: 110, protected: 0 },
   { id: 'function-limits', parentId: null, title: '使用限制', path: '/business/function-limits', icon: 'Lock', sortCode: 120, protected: 0 },
@@ -119,15 +119,27 @@ async function createAndSeed(db: Kysely<Database>): Promise<void> {
 async function ensurePaymentOrderMenu(db: Kysely<Database>) {
   const item = SEED.find((entry) => entry.id === 'payment-order');
   if (!item) return;
-  const existing = await sql<{ id: string }>`SELECT id FROM admin_menu WHERE id = ${item.id} LIMIT 1`.execute(db);
-  if (existing.rows.length > 0) return;
-  const now = new Date();
-  await sql`
-    INSERT INTO admin_menu
-      (id, parent_id, title, path, icon, sort_code, enabled, protected, deleted, create_time, update_time)
-    VALUES
-      (${item.id}, ${item.parentId}, ${item.title}, ${item.path}, ${item.icon}, ${item.sortCode}, 1, ${item.protected}, 0, ${now}, ${now})
+  const existing = await sql<{ id: string; path: string }>`
+    SELECT id, path FROM admin_menu WHERE id = ${item.id} LIMIT 1
   `.execute(db);
+  const now = new Date();
+  const current = existing.rows[0];
+  if (!current) {
+    await sql`
+      INSERT INTO admin_menu
+        (id, parent_id, title, path, icon, sort_code, enabled, protected, deleted, create_time, update_time)
+      VALUES
+        (${item.id}, ${item.parentId}, ${item.title}, ${item.path}, ${item.icon}, ${item.sortCode}, 1, ${item.protected}, 0, ${now}, ${now})
+    `.execute(db);
+    return;
+  }
+  if (current.path === '/business/payment-order') {
+    await sql`
+      UPDATE admin_menu
+      SET path = ${item.path}, parent_id = NULL, update_time = ${now}
+      WHERE id = ${item.id}
+    `.execute(db);
+  }
 }
 
 async function listRows(db: Kysely<Database>): Promise<MenuRow[]> {
