@@ -70,6 +70,7 @@ export function paymentNotifyUrl(base: string, webName: string | undefined): str
   if (webName === 'offer') return `${trimmed}/offer`;
   if (webName === 'photo') return `${trimmed}/photo`;
   if (webName === 'jisu') return `${trimmed}/jisu`;
+  if (webName === 'xingce') return `${trimmed}/xingce`;
   return trimmed;
 }
 

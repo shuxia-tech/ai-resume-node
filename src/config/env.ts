@@ -83,6 +83,8 @@ const envSchema = z
     WECHAT_PAY_PRIVATE_KEY_PATH: z.string().optional(),
     WECHAT_PAY_CERT_PATH: z.string().optional(),
     WECHAT_PAY_NOTIFY_URL: optionalUrl,
+    FEISHU_ORDER_WEBHOOK_URL: optionalUrl,
+    FEISHU_OPS_WEBHOOK_URL: optionalUrl,
     PAYMENT_MODE: z.enum(['mock', 'live']).default('mock'),
     DEEPSEEK_API_KEY: z.string().optional(),
     DEEPSEEK_BASE_URL: optionalUrl.default('https://api.deepseek.com'),

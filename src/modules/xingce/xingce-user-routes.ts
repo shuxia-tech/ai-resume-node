@@ -125,6 +125,41 @@ async function ensureUserTables(db: Kysely<Database>) {
   `.execute(db);
 }
 
+export async function grantXingceMembership(
+  db: Kysely<Database>,
+  userId: string,
+  days: number,
+  sourceKey: string,
+) {
+  if (!Number.isInteger(days) || days <= 0) throw new AppError(400, '行测超人套餐必须配置会员天数');
+  const now = new Date();
+  const profile = await sql<{ NICKNAME: string | null; NAME: string | null }>`
+    SELECT NICKNAME, NAME FROM client_user WHERE ID = ${userId} AND DELETE_FLAG = 'NOT_DELETE'
+  `.execute(db);
+  const name = (profile.rows[0]?.NICKNAME || profile.rows[0]?.NAME || '同学').slice(0, 60);
+  const existing = await sql<{ expires_at: Date }>`
+    SELECT expires_at FROM t_xingce_member WHERE user_id = ${userId} FOR UPDATE
+  `.execute(db);
+  const next = extendExpiry(
+    existing.rows[0]?.expires_at ? new Date(existing.rows[0].expires_at) : null,
+    now,
+    days,
+  );
+  if (existing.rows[0]) {
+    await sql`UPDATE t_xingce_member SET expires_at = ${next}, name = ${name} WHERE user_id = ${userId}`.execute(db);
+  } else {
+    const invitationCode = randomBytes(16).toString('base64url');
+    await sql`
+      INSERT INTO t_xingce_member (user_id, name, invitation_code, expires_at, joined_at)
+      VALUES (${userId}, ${name}, ${invitationCode}, ${next}, ${now})
+    `.execute(db);
+  }
+  await sql`
+    INSERT INTO t_xingce_reward_ledger (id, user_id, source, source_key, days, awarded_at)
+    VALUES (${randomUUID()}, ${userId}, 'package', ${sourceKey}, ${days}, ${now})
+  `.execute(db);
+}
+
 async function awardDays(
   db: Kysely<Database>,
   userId: string,
@@ -159,7 +194,7 @@ async function memberSummary(db: Kysely<Database>, userId: string, name: string)
     FROM t_xingce_member m WHERE m.user_id = ${userId}
   `.execute(db);
   const member = row.rows[0];
-  if (!member) return { authenticated: true, joined: false, name };
+  if (!member) return { authenticated: true, joined: false, name, id: userId };
   const earned = await sql<{ days: number }>`
     SELECT COALESCE(SUM(days), 0) AS days FROM t_xingce_reward_ledger WHERE user_id = ${userId}
   `.execute(db);
@@ -173,6 +208,7 @@ async function memberSummary(db: Kysely<Database>, userId: string, name: string)
   `.execute(db);
   const expires = new Date(member.expires_at);
   return {
+    id: userId,
     authenticated: true,
     joined: true,
     name: member.name,

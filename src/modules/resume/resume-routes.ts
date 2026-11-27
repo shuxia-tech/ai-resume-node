@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { AppError } from '@/common/errors.js';
 import { ok } from '@/common/http-response.js';
-import { requireUser } from '@/auth/request-user.js';
+import { requestToken, requireUser } from '@/auth/request-user.js';
 import type { AppEnv } from '@/config/env.js';
 import type { Database } from '@/infrastructure/database.js';
 import type { Kysely } from 'kysely';
@@ -244,7 +244,7 @@ async function listMemberPackages(
       !(redeem?.user_id && redeem.user_id === options?.userId) &&
       Number.isFinite(rate);
     if (usable && redeem) {
-      return ok(applyPackageDiscount(packages, rate, redeem.member_package_id));
+      return ok(await withClaimFlags(db, options?.userId, applyPackageDiscount(packages, rate, redeem.member_package_id)));
     }
   }
 
@@ -258,16 +258,35 @@ async function listMemberPackages(
     const createdAt = user?.create_time;
     if (createdAt instanceof Date && Date.now() < createdAt.getTime() + 72 * 60 * 60 * 1000) {
       const discounted = applyPackageDiscount(
-        packages.filter((item) => item.billingMode !== 'COUNT_PACKAGE'),
+        packages.filter((item) => item.billingMode !== 'COUNT_PACKAGE' && item.billingMode !== 'FREE_TRIAL'),
         0.8,
         null,
       );
       const discountedById = new Map(discounted.map((item) => [item.id, item]));
-      return ok(packages.map((item) => discountedById.get(item.id) ?? item));
+      return ok(await withClaimFlags(db, options.userId, packages.map((item) => discountedById.get(item.id) ?? item)));
     }
   }
 
-  return ok(packages);
+  return ok(await withClaimFlags(db, options?.userId, packages));
+}
+
+async function withClaimFlags<T extends { id: string }>(
+  db: Kysely<Database>,
+  userId: string | undefined,
+  packages: T[],
+) {
+  if (!userId || packages.length === 0) return packages.map((item) => ({ ...item, claimed: false }));
+  try {
+    const rows = await sql<{ package_id: string }>`
+      SELECT package_id FROM sc_member_package_claim
+      WHERE user_id = ${userId}
+        AND package_id IN (${sql.join(packages.map((item) => sql`${item.id}`))})
+    `.execute(db);
+    const claimed = new Set(rows.rows.map((row) => row.package_id));
+    return packages.map((item) => ({ ...item, claimed: claimed.has(item.id) }));
+  } catch {
+    return packages.map((item) => ({ ...item, claimed: false }));
+  }
 }
 
 function bool(value: number | boolean | null): boolean {
@@ -408,7 +427,9 @@ export function registerResumeRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
             ? 'offer星球'
             : request.query.webName === 'jisu'
               ? '极速海投'
-              : '高分简历';
+              : request.query.webName === 'xingce'
+                ? '行测超人'
+                : '高分简历';
       return listMemberPackages(db, category, {
         code: request.query.code,
         userId: request.userId,
@@ -428,6 +449,23 @@ export function registerResumeRoutes(app: FastifyInstance, env: AppEnv, db: Kyse
     { preHandler: authenticate },
     async (request) =>
       listMemberPackages(db, '极速海投', { code: request.query.code, userId: request.userId }),
+  );
+
+  app.get<{ Querystring: { code?: string } }>(
+    '/c/resume/memberPackage/xingce',
+    async (request) => {
+      if (requestToken(request)) {
+        try {
+          await authenticate(request);
+        } catch {
+          request.userId = undefined;
+        }
+      }
+      return listMemberPackages(db, '行测超人', {
+        code: request.query.code,
+        userId: request.userId,
+      });
+    },
   );
 
   app.get<{ Querystring: { code?: string } }>(

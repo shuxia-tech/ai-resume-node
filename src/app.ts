@@ -23,6 +23,7 @@ import { registerAdminMenuRoutes } from '@/modules/admin/admin-menu-routes.js';
 import { registerGaAdminRoutes } from '@/modules/admin/ga-routes.js';
 import { registerClientUserAdminRoutes } from '@/modules/admin/client-user-routes.js';
 import { registerAdminAppRoutes } from '@/modules/admin/admin-app-routes.js';
+import { registerPaymentOrderAdminRoutes } from '@/modules/admin/payment-order-routes.js';
 import { registerAdminFeatureRoutes } from '@/modules/admin/admin-feature-routes.js';
 import { registerCampusCircleRoutes } from '@/modules/campus-circle/campus-routes.js';
 import { registerDistributionRoutes } from '@/modules/distribution/distribution-routes.js';
@@ -37,6 +38,7 @@ import { registerExtensionAiRoutes } from '@/modules/extension/extension-ai-rout
 import { registerPaymentWebSocket } from '@/modules/payment/payment-websocket.js';
 import { closeAuthRedis, pingAuthRedis } from '@/auth/request-user.js';
 import { registerMaintenanceJobs } from '@/modules/maintenance/photo-compensation.js';
+import { registerOperationStatJob } from '@/modules/maintenance/operation-stat.js';
 
 /**
  * Production nginx `location /api` plus `proxy_pass .../` forwards
@@ -127,6 +129,7 @@ export function buildApp(env: AppEnv = loadEnv()): FastifyInstance {
   registerGaAdminRoutes(app, env, database);
   registerClientUserAdminRoutes(app, env, database);
   registerAdminAppRoutes(app, env, database);
+  registerPaymentOrderAdminRoutes(app, env, database);
   registerAdminFeatureRoutes(app, env, database);
   registerCampusCircleRoutes(app, env, database);
   registerDistributionRoutes(app, env, database);
@@ -140,6 +143,7 @@ export function buildApp(env: AppEnv = loadEnv()): FastifyInstance {
   registerAuthRoutes(app, env, database);
   registerExtensionAiRoutes(app, env);
   registerMaintenanceJobs(app, env, database);
+  registerOperationStatJob(app, env, database);
   app.addHook('onClose', async () => {
     await database.destroy();
     await closeAuthRedis();

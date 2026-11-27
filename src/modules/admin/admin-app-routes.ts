@@ -117,11 +117,17 @@ function table(path: string, name: string, extra: Partial<AdminResource> = {}): 
 
 function normalizeMemberPackage(body: Record<string, unknown>) {
   const mode = queryText(body.billingMode) || 'MEMBER_UNLIMITED';
-  if (mode !== 'MEMBER_UNLIMITED' && mode !== 'COUNT_PACKAGE') {
+  if (mode !== 'MEMBER_UNLIMITED' && mode !== 'COUNT_PACKAGE' && mode !== 'FREE_TRIAL') {
     throw new AppError(400, `不支持的计费模式：${mode}`);
   }
   body.billingMode = mode;
-  if (mode === 'COUNT_PACKAGE') {
+  if (mode === 'FREE_TRIAL') {
+    const days = Number(body.giftDay);
+    if (!Number.isInteger(days) || days <= 0) throw new AppError(400, '免费体验必须配置领取天数');
+    body.currentAmount = 0;
+    body.originalAmount = 0;
+    body.usageCount = 0;
+  } else if (mode === 'COUNT_PACKAGE') {
     const usage = Number(body.usageCount);
     if (!Number.isInteger(usage) || usage <= 0) throw new AppError(400, '按次套餐必须配置购买次数');
     if (body.giftDay == null || body.giftDay === '') body.giftDay = 0;
@@ -215,7 +221,7 @@ const RESOURCES: AdminResource[] = [
     },
   }),
   table('/app/campusrecruitment', 'sc_campus_recruitment', {
-    orderBy: ['createTime desc', 'id asc'],
+    orderBy: ['recordTime desc', 'createTime desc', 'id asc'],
     query: { company: 'like', workLocation: 'like', industry: 'like', positions: 'like', infoType: 'eq' },
   }),
   table('/app/notification', 'sc_notification', {

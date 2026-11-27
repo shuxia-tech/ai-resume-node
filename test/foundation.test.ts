@@ -487,6 +487,7 @@ describe('foundation', () => {
       ['GET', '/c/resume/memberPackage/offer'],
       ['GET', '/c/resume/memberPackage/photo'],
       ['GET', '/c/resume/memberPackage/jisu'],
+      ['GET', '/c/resume/memberPackage/xingce'],
       ['GET', '/c/resume/redeem/:code'],
       ['GET', '/c/resume/functionLimits/count'],
       ['POST', '/c/resume/aiTest'],

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { shanghaiClock, operationStatText } from '@/modules/maintenance/operation-stat.js';
+import { orderWebhook, opsWebhook, paymentSuccessText } from '@/modules/payment/feishu-notify.js';
 import {
   chargeFen,
   parseWechatXml,
@@ -109,5 +111,49 @@ describe('wechat pay', () => {
         config,
       ),
     ).toThrow('同步订单失败：订单不存在');
+  });
+
+  it('formats the Feishu payment notice like the Java callback', () => {
+    expect(
+      paymentSuccessText({
+        userId: 'u1',
+        nickname: '小明',
+        amountFen: 1990,
+        packageName: '月度会员',
+      }),
+    ).toBe('用户：u1_小明，支付成功，支付金额：19.90，套餐：月度会员');
+  });
+
+  it('keeps the two Feishu bots on their Java webhooks in production', () => {
+    const production = { NODE_ENV: 'production' as const };
+    expect(orderWebhook(production)).toContain('e2531cf7-337f-40e8-abc8-b11360a2b32c');
+    expect(opsWebhook(production)).toContain('9a137728-64e6-46d8-9d6e-145adbe5f19c');
+    expect(orderWebhook({ NODE_ENV: 'test' })).toBeUndefined();
+    expect(opsWebhook({ NODE_ENV: 'test' })).toBeUndefined();
+  });
+
+  it('sends the operation summary at 23:59 Shanghai time', () => {
+    expect(shanghaiClock(new Date('2026-11-26T15:59:00.000Z'))).toMatchObject({
+      date: '2026-11-26',
+      hour: '23',
+      minute: '59',
+    });
+    const text = operationStatText({
+      todayNewUser: 1,
+      monthNewUser: 2,
+      totalUser: 3,
+      todayIncome: 1.5,
+      monthIncome: null,
+      todayOrderCount: 4,
+      monthOrderCount: 5,
+      totalOrderCount: 6,
+      todayReadSysNotice: 0,
+      todayReadActNotice: 0,
+      todayReadLikeMsg: 0,
+      todayReadCollectMsg: 0,
+    });
+    expect(text).toContain('今日新增用户: 1');
+    expect(text).toContain('今日收入: 1.50 元');
+    expect(text).toContain('本月收入: 0.00 元');
   });
 });

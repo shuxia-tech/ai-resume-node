@@ -1,13 +1,16 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { Kysely } from 'kysely';
+import { sql } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { AppError } from '@/common/errors.js';
 import { fail, ok } from '@/common/http-response.js';
 import { requireUser } from '@/auth/request-user.js';
 import type { AppEnv } from '@/config/env.js';
 import type { Database, MemberPackageRow } from '@/infrastructure/database.js';
+import { notifyPaymentSuccess } from '@/modules/payment/feishu-notify.js';
 import { notifyPaymentWebSocket } from '@/modules/payment/payment-websocket.js';
+import { grantXingceMembership } from '@/modules/xingce/xingce-user-routes.js';
 import {
   buildJsapiPayParams,
   chargeFen,
@@ -51,7 +54,24 @@ function packageCategory(webName?: string) {
   if (webName === 'offer') return 'offer星球';
   if (webName === 'photo') return 'AI证件照';
   if (webName === 'jisu') return '极速海投';
+  if (webName === 'xingce') return '行测超人';
   return '高分简历';
+}
+
+function isXingcePackage(extJson: string | null | undefined) {
+  const raw = extJson ?? '';
+  if (raw === '行测超人') return true;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed === '行测超人') return true;
+    return Boolean(
+      parsed &&
+        typeof parsed === 'object' &&
+        (parsed as { category?: string }).category === '行测超人',
+    );
+  } catch {
+    return false;
+  }
 }
 
 function parseCallback(body: unknown): PaymentBody {
@@ -94,14 +114,40 @@ async function findPackage(
 
 export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kysely<Database>) {
   const authenticate = requireUser(env);
+  void ensureClaimTable(db);
 
-  function livePayConfig(): WechatPayConfig {
+function webNameForCategory(category: string | null) {
+  if (category === '行测超人') return 'xingce';
+  if (category === 'AI证件照') return 'photo';
+  if (category === 'offer星球') return 'offer';
+  if (category === '极速海投') return 'jisu';
+  return undefined;
+}
+
+async function ensureClaimTable(db: Kysely<Database>) {
+  await sql`
+    CREATE TABLE IF NOT EXISTS sc_member_package_claim (
+      id varchar(40) NOT NULL,
+      user_id varchar(64) NOT NULL,
+      package_id varchar(40) NOT NULL,
+      create_time datetime NOT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY uk_member_claim_user_package (user_id, package_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='会员免费体验领取记录'
+  `.execute(db);
+}
+
+function livePayConfig(): WechatPayConfig {
     const appId = env.WECHAT_PAY_APP_ID;
     const mchId = env.WECHAT_PAY_MCH_ID;
     const mchKey = env.WECHAT_PAY_MCH_KEY;
     const notifyUrl = env.WECHAT_PAY_NOTIFY_URL;
     if (!appId || !mchId || !mchKey || !notifyUrl) throw new AppError(503, '微信支付未配置');
     return { appId, mchId, mchKey, notifyUrl };
+  }
+
+  function announcePaid(userId: string, amountFen: number, packageName: string) {
+    void notifyPaymentSuccess(env, db, app.log, { userId, amountFen, packageName });
   }
 
   async function createOrder(
@@ -119,6 +165,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     const packageId = params.packageId ?? body.packageId;
     if (!packageId) throw new AppError(400, 'packageId不能为空');
     const memberPackage = await findPackage(db, packageId, webName);
+    if (memberPackage.billing_mode === 'FREE_TRIAL') throw new AppError(400, '免费体验请直接领取');
     const id = randomUUID().replaceAll('-', '');
     const orderNo = `codex_migration_test_order_${Date.now()}_${id.slice(0, 8)}`;
     await db
@@ -168,6 +215,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     if (qrResponse && reply) {
       const escapedOrderNo = orderNo.replaceAll('&', '&amp;').replaceAll('<', '&lt;');
       return reply
+        .header('x-order-no', orderNo)
         .header('x-mock-order-no', orderNo)
         .type('image/svg+xml')
         .send(
@@ -189,6 +237,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     const packageId = params.packageId ?? body.packageId;
     if (!packageId) throw new AppError(400, 'packageId不能为空');
     const memberPackage = await findPackage(db, packageId, webName);
+    if (memberPackage.billing_mode === 'FREE_TRIAL') throw new AppError(400, '免费体验请直接领取');
     if (
       webName === 'photo' &&
       memberPackage.billing_mode === 'COUNT_PACKAGE' &&
@@ -297,7 +346,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     if (qrResponse) {
       if (!unified.codeUrl || !reply) throw new AppError(502, '微信支付未返回二维码');
       const png = await renderPayQr(unified.codeUrl);
-      return reply.type('image/png').send(png);
+      return reply.header('x-order-no', outTradeNo).type('image/png').send(png);
     }
     if (!unified.prepayId) throw new AppError(502, '微信支付未返回预支付单号');
     return ok({
@@ -316,6 +365,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     ['/c/resume/memberPackage/createOrder/offer/:code/:packageId', 'offer'],
     ['/c/resume/memberPackage/createOrder/photo/:code/:packageId', 'photo'],
     ['/c/resume/memberPackage/createOrder/jisu/:code/:packageId', 'jisu'],
+    ['/c/resume/memberPackage/createOrder/xingce/:code/:packageId', 'xingce'],
   ] as const)
     app.post(path, async (request, reply) => createOrder(request, webName, reply, true));
 
@@ -324,6 +374,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     ['/c/resume/memberPackage/createJSAPIOrder/offer', 'offer'],
     ['/c/resume/memberPackage/createJSAPIOrder/photo', 'photo'],
     ['/c/resume/memberPackage/createJSAPIOrder/jisu', 'jisu'],
+    ['/c/resume/memberPackage/createJSAPIOrder/xingce', 'xingce'],
   ] as const)
     app.post(path, async (request, reply) => createOrder(request, webName, reply, false));
 
@@ -371,6 +422,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
         .where('code_id', '=', redeem.code_id)
         .execute();
     });
+    announcePaid(userId, 0, memberPackage.package_name);
     return ok(null);
   }
 
@@ -379,6 +431,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     ['/c/resume/memberPackage/createFreeOrder/offer/:code/:packageId', 'offer'],
     ['/c/resume/memberPackage/createFreeOrder/photo/:code/:packageId', 'photo'],
     ['/c/resume/memberPackage/createFreeOrder/jisu/:code/:packageId', 'jisu'],
+    ['/c/resume/memberPackage/createFreeOrder/xingce/:code/:packageId', 'xingce'],
   ] as const)
     app.post(path, async (request) => createFreeOrder(request, webName));
 
@@ -394,6 +447,57 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
     '/c/resume/memberPackage/createLinkFreeOrder/jisu',
     { preHandler: authenticate },
     async () => ok(null),
+  );
+  app.post(
+    '/c/resume/memberPackage/createLinkFreeOrder/xingce',
+    { preHandler: authenticate },
+    async () => ok(null),
+  );
+
+  app.post<{ Params: { packageId: string } }>(
+    '/c/resume/memberPackage/claim/:packageId',
+    async (request) => {
+      await authenticate(request);
+      await ensureClaimTable(db);
+      const packageId = request.params.packageId;
+      const userId = request.userId!;
+      const giftDay = await db.transaction().execute(async (trx) => {
+        const memberPackage = await trx
+          .selectFrom('sc_member_package')
+          .selectAll()
+          .where('id', '=', packageId)
+          .where('delete_flag', '=', 'NOT_DELETE')
+          .forUpdate()
+          .executeTakeFirst();
+        if (!memberPackage) throw new AppError(404, '不存在该会员套餐或已下架');
+        if (memberPackage.billing_mode !== 'FREE_TRIAL') throw new AppError(400, '该套餐不支持直接领取');
+        const claimed = await sql<{ id: string }>`
+          SELECT id FROM sc_member_package_claim
+          WHERE user_id = ${userId} AND package_id = ${packageId}
+          FOR UPDATE
+        `.execute(trx);
+        if (claimed.rows[0]) throw new AppError(400, '已领取过该免费体验');
+        await sql`
+          INSERT INTO sc_member_package_claim (id, user_id, package_id, create_time)
+          VALUES (${randomUUID().replaceAll('-', '')}, ${userId}, ${packageId}, ${new Date()})
+        `.execute(trx);
+        const user = await trx
+          .selectFrom('client_user')
+          .select([
+            'member_expiration_time',
+            'offer_member_expiration_time',
+            'photo_member_expiration_time',
+          ] as any)
+          .where('ID', '=', userId)
+          .where('DELETE_FLAG', '=', 'NOT_DELETE')
+          .forUpdate()
+          .executeTakeFirst();
+        if (!user) throw new AppError(404, '用户不存在');
+        await grantPackage(trx, userId, memberPackage, webNameForCategory(memberPackage.ext_json), user);
+        return Number(memberPackage.gift_day ?? 0);
+      });
+      return ok({ giftDay, claimed: true });
+    },
   );
 
   async function callback(request: any, reply: FastifyReply, webName: string | undefined) {
@@ -435,7 +539,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
         .forUpdate()
         .executeTakeFirst();
       if (!user) throw new AppError(404, '用户不存在');
-      await grantPackage(trx, order.user_id!, memberPackage, webName, user);
+      await grantPackage(trx, order.user_id!, memberPackage, webName, user, `pay:${order.id}`);
       await trx
         .updateTable('t_payment_order')
         .set({
@@ -511,7 +615,7 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
         .forUpdate()
         .executeTakeFirst();
       if (!user) return { response: '用户不存在', changed: false, userId: undefined };
-      await grantPackage(trx, order.user_id, memberPackage, webName, user);
+      await grantPackage(trx, order.user_id, memberPackage, webName, user, `pay:${order.id}`);
       await trx
         .updateTable('t_payment_order')
         .set({
@@ -525,7 +629,13 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
         })
         .where('id', '=', order.id)
         .execute();
-      return { response: 'OK', changed: true, userId: order.user_id };
+      return {
+        response: 'OK',
+        changed: true,
+        userId: order.user_id,
+        amountFen: Number(order.amount),
+        packageName: memberPackage.package_name,
+      };
     });
     if (result.changed && result.userId) {
       notifyPaymentWebSocket(result.userId, 'WxPay', {
@@ -534,6 +644,9 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
         data: '支付成功',
         msg: '操作成功',
       });
+      if ('packageName' in result && result.packageName) {
+        announcePaid(result.userId, result.amountFen, result.packageName);
+      }
     }
     return reply.type('text/xml').send(wechatNotifyXml(result.response === 'OK', result.response));
   }
@@ -549,6 +662,120 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
   );
   app.post('/c/resume/memberPackage/wxPayCallback/jisu', async (request, reply) =>
     callback(request, reply, 'jisu'),
+  );
+  app.post('/c/resume/memberPackage/wxPayCallback/xingce', async (request, reply) =>
+    callback(request, reply, 'xingce'),
+  );
+
+  // The browser polls this after showing a QR code. WeChat's notify URL may
+  // land on another process, so a SUCCESS query settles the same order here.
+  app.post(
+    '/c/resume/memberPackage/syncOrder/xingce',
+    { preHandler: authenticate },
+    async (request) => {
+      const userId = request.userId as string;
+      const orderNo = String((request.body as { orderNo?: string } | null)?.orderNo ?? '').trim();
+      if (!orderNo) return ok({ paid: false }, '缺少订单号');
+      const order = await db
+        .selectFrom('t_payment_order')
+        .selectAll()
+        .where('order_no', '=', orderNo)
+        .where('user_id', '=', userId)
+        .where('delete_flag', '=', 'NOT_DELETE')
+        .executeTakeFirst();
+      if (!order?.product_id) return ok({ paid: false }, '未找到支付订单');
+      const memberPackage = await db
+        .selectFrom('sc_member_package')
+        .selectAll()
+        .where('id', '=', order.product_id)
+        .where('delete_flag', '=', 'NOT_DELETE')
+        .executeTakeFirst();
+      if (!memberPackage || !isXingcePackage(memberPackage.ext_json)) {
+        return ok({ paid: false }, '不是行测超人订单');
+      }
+      if (order.status === '支付成功') return ok({ paid: true }, '订单已支付成功');
+      if (!canApplyMockPaymentSuccess(order.status) || env.PAYMENT_MODE !== 'live') {
+        return ok({ paid: false }, '订单尚未支付成功');
+      }
+
+      let queried: Awaited<ReturnType<typeof queryWechatOrder>>;
+      try {
+        queried = await queryWechatOrder(livePayConfig(), order.order_no);
+      } catch (error) {
+        app.log.warn({ err: error, orderNo }, 'xingce payment sync query failed');
+        return ok({ paid: false }, '订单尚未支付成功');
+      }
+      if (queried.tradeState !== 'SUCCESS' || Number(order.amount) !== queried.totalFee) {
+        if (queried.tradeState === 'SUCCESS') {
+          app.log.error(
+            { orderNo, amount: order.amount, totalFee: queried.totalFee },
+            'xingce payment amount mismatch',
+          );
+        }
+        return ok({ paid: false }, '订单尚未支付成功');
+      }
+
+      let settled: 'missing' | 'already' | 'closed' | 'amount' | 'user' | 'granted';
+      try {
+        settled = await db.transaction().execute(async (trx) => {
+          const locked = await trx
+            .selectFrom('t_payment_order')
+            .selectAll()
+            .where('id', '=', order.id)
+            .where('delete_flag', '=', 'NOT_DELETE')
+            .forUpdate()
+            .executeTakeFirst();
+          if (!locked?.user_id || !locked.product_id) return 'missing' as const;
+          if (locked.status === '支付成功') return 'already' as const;
+          if (!canApplyMockPaymentSuccess(locked.status)) return 'closed' as const;
+          if (Number(locked.amount) !== queried.totalFee) return 'amount' as const;
+          const lockedPackage = await findPackage(trx, locked.product_id, 'xingce');
+          if (!isXingcePackage(lockedPackage.ext_json)) return 'missing' as const;
+          const user = await trx
+            .selectFrom('client_user')
+            .select(['ID'] as any)
+            .where('ID', '=', locked.user_id)
+            .where('DELETE_FLAG', '=', 'NOT_DELETE')
+            .forUpdate()
+            .executeTakeFirst();
+          if (!user) return 'user' as const;
+          await grantPackage(trx, locked.user_id, lockedPackage, 'xingce', user, `pay:${locked.id}`);
+          await trx
+            .updateTable('t_payment_order')
+            .set({
+              status: '支付成功',
+              update_time: new Date(),
+              openid: queried.openid ?? locked.openid,
+              ext_json: JSON.stringify({
+                mode: 'live',
+                webName: 'xingce',
+                tradeState: queried.tradeState,
+                transactionId: queried.transactionId,
+                totalFee: queried.totalFee,
+              }),
+            })
+            .where('id', '=', locked.id)
+            .execute();
+          return 'granted' as const;
+        });
+      } catch (error) {
+        app.log.error({ err: error, orderNo }, 'xingce payment settle failed');
+        return ok({ paid: false }, '订单尚未支付成功');
+      }
+      if (settled === 'granted') {
+        notifyPaymentWebSocket(userId, 'WxPay', {
+          code: 200,
+          success: true,
+          data: '支付成功',
+          msg: '操作成功',
+        });
+        announcePaid(userId, Number(order.amount), memberPackage.package_name);
+      }
+      if (settled === 'granted' || settled === 'already') {
+        return ok({ paid: true }, '支付成功，会员已开通');
+      }
+      return ok({ paid: false }, '订单尚未支付成功');
+    },
   );
 
   // The photo site polls this while the WeChat callback is delayed. A paid
@@ -683,6 +910,12 @@ export function registerPaymentRoutes(app: FastifyInstance, env: AppEnv, db: Kys
           data: '支付成功',
           msg: '操作成功',
         });
+        const paidPackage = await db
+          .selectFrom('sc_member_package')
+          .select('package_name')
+          .where('id', '=', order.product_id!)
+          .executeTakeFirst();
+        announcePaid(userId, Number(order.amount), paidPackage?.package_name ?? 'AI证件照');
         return ok(
           { remainingCount: await photoRemainingCount(db, userId) },
           '支付成功，次数已到账',
@@ -765,7 +998,18 @@ async function grantPackage(
   memberPackage: MemberPackageRow,
   webName: string | undefined,
   user: any,
+  sourceKey?: string,
 ) {
+  if (webName === 'xingce') {
+    const days = Number(memberPackage.gift_day ?? 0);
+    await grantXingceMembership(
+      db,
+      userId,
+      days,
+      sourceKey ?? `package:${userId}:${memberPackage.id}:${randomUUID()}`,
+    );
+    return;
+  }
   if (memberPackage.billing_mode === 'COUNT_PACKAGE') {
     const functionName = webName === 'photo' ? 'AI证件照生成' : '简历分析';
     const amount = Number(memberPackage.usage_count ?? 0);
