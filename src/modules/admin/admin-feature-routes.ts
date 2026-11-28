@@ -798,17 +798,52 @@ async function importCampus(db: Kysely<Database>, request: FastifyRequest, infoT
     ORDER BY record_time DESC
     LIMIT 1
   `.execute(db);
-  const latestTime = latest.rows[0]?.record_time ?? null;
+  const latestDay = latest.rows[0]?.record_time ? recordDayKey(latest.rows[0].record_time) : null;
+  const existingRows = await sql<{
+    company: string | null;
+    title: string | null;
+    referral_method: string | null;
+    positions: string | null;
+  }>`
+    SELECT company, title, referral_method, positions
+    FROM sc_campus_recruitment
+    WHERE info_type = ${infoType}
+  `.execute(db);
+  const existing = new Set(
+    existingRows.rows.map((row) =>
+      campusIdentity({
+        company: row.company ?? '',
+        title: row.title ?? '',
+        referralMethod: row.referral_method ?? '',
+        positions: row.positions ?? '',
+      }),
+    ),
+  );
   const rows: Record<string, unknown>[] = [];
+  let skipped = 0;
   for (let rowNumber = headerRowNumber + 1; rowNumber <= sheet.rowCount; rowNumber += 1) {
     const row = sheet.getRow(rowNumber);
     const read = (name: string) => cellText(row.getCell(columns.get(name) ?? 1).value);
     const recordTime = parseWallClock(row.getCell(columns.get(infoType === '校招' ? '⏰收录时间' : '刷新时间') ?? 1).value);
     if (!recordTime) continue;
-    if (latestTime && recordTime.getTime() <= latestTime.getTime()) break;
+    if (latestDay && recordDayKey(recordTime) < latestDay) {
+      skipped += 1;
+      continue;
+    }
     const company = read(infoType === '校招' ? '🏢公司' : '公司');
     if (!company) continue;
     if (infoType === '内推' && !read('内推链接')) continue;
+    const identity = campusIdentity({
+      company,
+      title: read(infoType === '校招' ? '官方标题' : ''),
+      referralMethod: read(infoType === '校招' ? '推文/投递链接' : '内推链接'),
+      positions: read(infoType === '校招' ? '岗位' : '招聘岗位'),
+    });
+    if (existing.has(identity)) {
+      skipped += 1;
+      continue;
+    }
+    existing.add(identity);
     rows.push(
       infoType === '校招'
         ? {
@@ -834,7 +869,10 @@ async function importCampus(db: Kysely<Database>, request: FastifyRequest, infoT
           },
     );
   }
-  if (rows.length === 0) throw new AppError(400, '未找到有效数据');
+  if (rows.length === 0) {
+    if (skipped === 0) throw new AppError(400, '未找到有效数据');
+    return ok(`未导入新数据，已跳过 ${skipped} 条已存在或更早的记录`);
+  }
   for (const [index, row] of rows.entries()) {
     await sql`
       INSERT INTO sc_campus_recruitment (
@@ -849,7 +887,22 @@ async function importCampus(db: Kysely<Database>, request: FastifyRequest, infoT
       )
     `.execute(db);
   }
-  return ok(`成功导入 ${rows.length} 条数据`);
+  return ok(`成功导入 ${rows.length} 条数据${skipped ? `，跳过 ${skipped} 条已存在或更早的记录` : ''}`);
+}
+
+export function recordDayKey(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+export function campusIdentity(row: {
+  company: string;
+  title?: string;
+  referralMethod?: string;
+  positions?: string;
+}) {
+  return [row.company, row.title ?? '', row.referralMethod ?? '', row.positions ?? '']
+    .map((value) => value.trim())
+    .join('\u0001');
 }
 
 export function cellText(value: ExcelJS.CellValue): string {

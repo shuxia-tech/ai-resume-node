@@ -228,6 +228,20 @@ async function memberSummary(db: Kysely<Database>, userId: string, name: string)
   };
 }
 
+async function assertXingceMember(db: Kysely<Database>, userId: string) {
+  const row = await sql<{ expires_at: Date; joined_at: Date; days: number }>`
+    SELECT m.expires_at, m.joined_at,
+      (SELECT COALESCE(SUM(days), 0) FROM t_xingce_reward_ledger WHERE user_id = m.user_id) AS days
+    FROM t_xingce_member m WHERE m.user_id = ${userId}
+  `.execute(db);
+  const member = row.rows[0];
+  if (!member) throw new AppError(403, '开通会员后才能刷题');
+  const expires = new Date(member.expires_at);
+  const earnedDays = Number(member.days ?? 0);
+  const opened = earnedDays > 0 || expires.getTime() > new Date(member.joined_at).getTime() + 1000;
+  if (!opened || expires.getTime() <= Date.now()) throw new AppError(403, '开通会员后才能刷题');
+}
+
 function parseOptions(value: string | null) {
   try {
     const parsed = JSON.parse(value || '{}');
@@ -392,6 +406,7 @@ export function registerXingceUserRoutes(
     { preHandler: loginRequired },
     async (request) => {
       await ensureUserTables(db);
+      await assertXingceMember(db, request.userId!);
       const offset = Math.max(0, Math.min(50_000, Number(request.query.offset) || 0));
       const category = request.query.category?.slice(0, 40) ?? '';
       const batchId = request.query.batchId?.slice(0, 80) ?? '';
@@ -601,6 +616,7 @@ export function registerXingceUserRoutes(
     Body: { questionId?: string; answer?: string; localDate?: string };
   }>('/c/xingce/attempts', { preHandler: authenticate }, async (request) => {
     await ensureUserTables(db);
+    await assertXingceMember(db, request.userId!);
     const questionId = String(request.body?.questionId ?? '');
     const answer = String(request.body?.answer ?? '').toUpperCase();
     const localDate = String(request.body?.localDate ?? '');
